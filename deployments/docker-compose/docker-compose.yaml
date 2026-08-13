@@ -1,0 +1,416 @@
+networks:
+  cloud-barista:
+    driver: bridge
+
+x-default-healthcheck: &default-healthcheck
+  interval: 1m
+  timeout: 5s
+  retries: 3
+  start_period: 10s
+
+services:
+  # ============================================================================
+  # CM-Centipede
+  # ----------------------------------------------------------------------------
+  # Placeholder — no Dockerfile/source code exists in this repository yet.
+  # Uncomment and adjust once cmd/cm-centipede/main.go and a Dockerfile are
+  # added (see cloud-barista/cm-beetle's Dockerfile + docker-compose.yaml for
+  # the pattern this block is modeled on). Port 8057 below is only an example;
+  # pick a free port when the service is wired up for real.
+  # ============================================================================
+  # cm-centipede:
+  #   image: cloudbaristaorg/cm-centipede:0.1.0
+  #   container_name: cm-centipede
+  #   # build:
+  #   #   context: ${PROJECT_ROOT}
+  #   #   dockerfile: Dockerfile
+  #   platform: linux/amd64
+  #   networks:
+  #     - cloud-barista
+  #   ports:
+  #     - target: 8057
+  #       published: 8057
+  #       protocol: tcp
+  #   depends_on:
+  #     - cb-tumblebug
+  #     - cm-beetle
+  #     - cm-honeybee
+  #   volumes:
+  #     - ./data/cm-centipede-container/log/:/app/log/
+  #     - ./data/cm-centipede-container/db/:/app/db/
+  #   environment:
+  #     - CENTIPEDE_SELF_ENDPOINT=localhost:8057
+  #     - CENTIPEDE_API_USERNAME=${CENTIPEDE_API_USERNAME:?Please set CENTIPEDE_API_USERNAME}
+  #     - CENTIPEDE_API_PASSWORD=${CENTIPEDE_API_PASSWORD:?Please set CENTIPEDE_API_PASSWORD}
+  #     - CENTIPEDE_TUMBLEBUG_ENDPOINT=http://cb-tumblebug:1323
+  #     - CENTIPEDE_BEETLE_ENDPOINT=http://cm-beetle:8056
+  #     - CENTIPEDE_HONEYBEE_ENDPOINT=http://cm-honeybee:8081
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8057/centipede/readyz"]
+  #     <<: *default-healthcheck
+  #   restart: unless-stopped
+
+  # ============================================================================
+  # CM-Beetle (Infrastructure Migration)
+  # Published image — CM-Centipede (data migration) runs on infrastructure
+  # that CM-Beetle has already migrated/provisioned via CB-Tumblebug.
+  # ============================================================================
+  cm-beetle:
+    image: cloudbaristaorg/cm-beetle:0.5.11
+    container_name: cm-beetle
+    platform: linux/amd64
+    networks:
+      - cloud-barista
+    ports:
+      - target: 8056
+        published: 8056
+        protocol: tcp
+    depends_on:
+      - cb-tumblebug
+    volumes:
+      - ./data/cm-beetle-container/log/:/app/log/
+      - ./data/cm-beetle-container/db/:/app/db/
+    environment:
+      - BEETLE_SELF_ENDPOINT=localhost:8056
+      - BEETLE_API_USERNAME=${BEETLE_API_USERNAME:?Please set BEETLE_API_USERNAME}
+      - BEETLE_API_PASSWORD=${BEETLE_API_PASSWORD:?Please set BEETLE_API_PASSWORD}
+      - BEETLE_NODE_ENV=development
+      - BEETLE_TUMBLEBUG_ENDPOINT=http://cb-tumblebug:1323
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8056/beetle/readyz"]
+      <<: *default-healthcheck
+    restart: unless-stopped
+
+  # ============================================================================
+  # CM-Damselfly (On-Premise & Cloud Infrastructure Model Repository)
+  # ============================================================================
+  cm-damselfly:
+    image: cloudbaristaorg/cm-damselfly:0.5.3
+    container_name: cm-damselfly
+    networks:
+      - cloud-barista
+    ports:
+      - "8088:8088"
+    environment:
+      - DAMSELFLY_API_ALLOW_ORIGINS=*
+      - DAMSELFLY_LOG_LEVEL=debug
+    volumes:
+      - ./data/cm-damselfly-container/db/:/app/db/
+    restart: always
+
+  # ============================================================================
+  # CM-Honeybee (On-Premise / Source Computing Information Collector)
+  # Built locally from the sibling cm-honeybee repo, cloned next to this repo:
+  #   some-parent-dir/{cm-centipede, cm-honeybee}
+  # ============================================================================
+  cm-honeybee:
+    image: cm-honeybee:local
+    # image: cm-honeybee:0.5.x
+    build:
+      context: ../../../cm-honeybee/server
+      dockerfile: Dockerfile
+    container_name: cm-honeybee
+    networks:
+      - cloud-barista
+    ports:
+      - "8081:8081" # server API
+      - "8082:8082" # agent proxy
+    depends_on:
+      openbao-honeybee:
+        condition: service_healthy
+    volumes:
+      - ./data/cm-honeybee-container/:/root/.cm-honeybee/:rw
+      - ./cm-honeybee/cm-honeybee.yaml:/conf/cm-honeybee.yaml:ro
+    environment:
+      # Dedicated OpenBao endpoint. Only used by CM-Honeybee builds that
+      # include self-managed OpenBao init/unseal/KV-enable (upstream main as
+      # of 2026-08 — see https://github.com/cloud-barista/cm-honeybee/blob/main/server/docker-compose.yaml).
+      # Harmless if the checked-out cm-honeybee source predates that feature.
+      - HONEYBEE_VAULT_ADDR=http://openbao-honeybee:8200
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/honeybee/readyz"]
+      <<: *default-healthcheck
+    restart: unless-stopped
+
+  # CM-Honeybee's own dedicated OpenBao (separate from the shared "openbao"
+  # instance below, which belongs to CB-Tumblebug / MC-Terrarium).
+  # Host port is 8201 (not 8200) to avoid clashing with that shared instance.
+  openbao-honeybee:
+    image: openbao/openbao:2.5.1
+    container_name: openbao-honeybee
+    cap_add:
+      - IPC_LOCK
+    networks:
+      - cloud-barista
+    ports:
+      - target: 8200
+        published: 8201
+        protocol: tcp
+    environment:
+      - BAO_ADDR=http://0.0.0.0:8200
+      - SKIP_SETCAP=true
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        chown -R openbao:openbao /openbao/data 2>/dev/null || true
+        exec docker-entrypoint.sh server -config=/openbao/config/openbao-config.hcl
+    volumes:
+      - ./data/openbao-honeybee-container/data:/openbao/data
+      - ./cm-honeybee/openbao-config.hcl:/openbao/config/openbao-config.hcl:ro
+    healthcheck:
+      # 'bao status' exit codes: 0=unsealed, 1=sealed, 2=uninitialized — all
+      # three mean the process is up. CM-Honeybee builds with self-managed
+      # OpenBao init/unseal this instance themselves; older builds simply
+      # leave it uninitialized and unused.
+      test: ["CMD", "sh", "-c", "rc=0; bao status || rc=$$?; [ $$rc -le 2 ]"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # CB-Tumblebug
+  cb-tumblebug:
+    image: cloudbaristaorg/cb-tumblebug:0.12.30
+    container_name: cb-tumblebug
+    networks:
+      - cloud-barista
+    ports:
+      - target: 1323
+        published: 1323
+        protocol: tcp
+    depends_on:
+      cb-tumblebug-etcd:
+        condition: service_started
+      cb-spider:
+        condition: service_started
+      cb-tumblebug-postgres:
+        condition: service_healthy
+    volumes:
+      - ./cb-tumblebug/conf/:/app/conf/
+      - ./cb-tumblebug/assets/:/app/assets/
+      - ./data/cb-tumblebug-container/meta_db/:/app/meta_db/
+      - ./data/cb-tumblebug-container/log/:/app/log/
+    environment:
+      - TB_SPIDER_REST_URL=http://cb-spider:1024/spider
+      - TB_ETCD_ENDPOINTS=http://cb-tumblebug-etcd:2379
+      - TB_TERRARIUM_REST_URL=http://mc-terrarium:8055/terrarium
+      - TB_POSTGRES_ENDPOINT=cb-tumblebug-postgres:5432
+      - TB_POSTGRES_DATABASE=${POSTGRES_DB:-tumblebug}
+      - TB_POSTGRES_USER=${POSTGRES_USER:-tumblebug}
+      - TB_POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-tumblebug}
+      - TB_SPIDER_USERNAME=${SP_API_USERNAME:?Please set SP_API_USERNAME}
+      - TB_SPIDER_PASSWORD=${SP_API_PASSWORD:?Please set SP_API_PASSWORD}
+      - TB_TERRARIUM_API_USERNAME=${TERRARIUM_API_USERNAME:?Please set TERRARIUM_API_USERNAME}
+      - TB_TERRARIUM_API_PASSWORD=${TERRARIUM_API_PASSWORD:?Please set TERRARIUM_API_PASSWORD}
+      - TB_API_USERNAME=${TB_API_USERNAME:?Please set TB_API_USERNAME}
+      - TB_API_PASSWORD=${TB_API_PASSWORD:?Please set TB_API_PASSWORD}
+      - TB_LOGLEVEL=debug
+      - VAULT_ADDR=http://openbao:8200
+      - VAULT_TOKEN=${VAULT_TOKEN:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:1323/tumblebug/readyz"]
+      <<: *default-healthcheck
+    restart: unless-stopped
+
+  # CB-Tumblebug ETCD (stores CB-Tumblebug metadata)
+  cb-tumblebug-etcd:
+    image: gcr.io/etcd-development/etcd:v3.6.11
+    container_name: cb-tumblebug-etcd
+    networks:
+      - cloud-barista
+    ports:
+      - 2379:2379
+      - 2380:2380
+    volumes:
+      - ./data/etcd/data:/etcd-data
+    entrypoint: /usr/local/bin/etcd
+    command:
+      - --name
+      - s1
+      - --data-dir
+      - /etcd-data
+      - --listen-client-urls
+      - http://0.0.0.0:2379
+      - --advertise-client-urls
+      - http://0.0.0.0:2379
+      - --listen-peer-urls
+      - http://0.0.0.0:2380
+      - --initial-advertise-peer-urls
+      - http://0.0.0.0:2380
+      - --initial-cluster
+      - s1=http://0.0.0.0:2380
+      - --initial-cluster-token
+      - tkn
+      - --initial-cluster-state
+      - new
+      - --log-level
+      - info
+      - --logger
+      - zap
+      - --log-outputs
+      - stderr
+      - --auth-token
+      - simple
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/etcdctl", "endpoint", "health", "--endpoints=http://localhost:2379"]
+      <<: *default-healthcheck
+    restart: unless-stopped
+
+  # CB-Tumblebug PostgreSQL (stores CB-Tumblebug Spec and Image metadata)
+  cb-tumblebug-postgres:
+    image: postgres:16-alpine
+    container_name: cb-tumblebug-postgres
+    restart: always
+    networks:
+      - cloud-barista
+    volumes:
+      - ./data/cb-tumblebug-container/meta_db/postgres:/var/lib/postgresql/data
+    command: postgres -c max_connections=500
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-tumblebug}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-tumblebug}
+      - POSTGRES_DB=${POSTGRES_DB:-tumblebug}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # CB-Spider
+  cb-spider:
+    image: cloudbaristaorg/cb-spider:0.12.42
+    container_name: cb-spider
+    networks:
+      - cloud-barista
+    ports:
+      - 1024:1024
+    depends_on:
+      cb-spider-postgres:
+        condition: service_healthy
+    volumes:
+      - ./data/cb-spider-container/log/:/root/go/src/github.com/cloud-barista/cb-spider/log/
+    environment:
+      - SERVER_ADDRESS=0.0.0.0:1024
+      - SPIDER_USERNAME=${SP_API_USERNAME:?Please set SP_API_USERNAME}
+      - SPIDER_PASSWORD=${SP_API_PASSWORD:?Please set SP_API_PASSWORD}
+      # CB-Tumblebug configuration uses PostgreSQL as CB-Spider METADB for management efficiency.
+      - SPIDER_METADB_ENDPOINT=cb-spider-postgres:5432
+      - SPIDER_METADB_USER=${SP_POSTGRES_USER}
+      - SPIDER_METADB_PASSWORD=${SP_POSTGRES_PASSWORD}
+      - SPIDER_METADB_DATABASE=${SP_POSTGRES_DB}
+      - SPIDER_LOG_LEVEL=error
+      - SPIDER_HISCALL_LOG_LEVEL=error
+      - ID_TRANSFORM_MODE=OFF
+      - PLUGIN_SW=OFF
+      - ADMINWEB=OFF
+      - SPIDER_BACKUP_ENABLED=false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:1024/spider/readyz"]
+      <<: *default-healthcheck
+    restart: unless-stopped
+
+  # CB-Spider PostgreSQL (METADB)
+  cb-spider-postgres:
+    image: postgres:16-alpine
+    container_name: cb-spider-postgres
+    restart: always
+    networks:
+      - cloud-barista
+    volumes:
+      - ./data/cb-spider-container/meta_db/postgres:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=${SP_POSTGRES_USER:-spider}
+      - POSTGRES_PASSWORD=${SP_POSTGRES_PASSWORD:-spider}
+      - POSTGRES_DB=${SP_POSTGRES_DB:-cb_spider}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # CB-MapUI (map-based client for CB-Tumblebug)
+  cb-mapui:
+    image: cloudbaristaorg/cb-mapui:0.12.56
+    container_name: cb-mapui
+    networks:
+      - cloud-barista
+    ports:
+      - target: 1324
+        published: 1324
+        protocol: tcp
+    restart: unless-stopped
+
+  # MC-Terrarium (resource extensions, e.g. AWS-to-site VPN, for CB-Tumblebug)
+  mc-terrarium:
+    image: cloudbaristaorg/mc-terrarium:0.1.4
+    container_name: mc-terrarium
+    networks:
+      - cloud-barista
+    ports:
+      - target: 8055
+        published: 8055
+        protocol: tcp
+    volumes:
+      - ./data/mc-terrarium-container/.terrarium:/app/.terrarium
+      - /etc/ssl/certs:/etc/ssl/certs:ro
+    environment:
+      - TERRARIUM_ROOT=/app
+      - TERRARIUM_API_USERNAME=${TERRARIUM_API_USERNAME:?Please set TERRARIUM_API_USERNAME}
+      - TERRARIUM_API_PASSWORD=${TERRARIUM_API_PASSWORD:?Please set TERRARIUM_API_PASSWORD}
+      - TERRARIUM_LOGLEVEL=info
+      # Note: OpenBao does not have its own OpenTofu/Terraform provider yet.
+      # The only available option is the hashicorp/vault provider, which
+      # exclusively reads VAULT_ADDR and VAULT_TOKEN from env vars.
+      - VAULT_ADDR=http://openbao:8200
+      - VAULT_TOKEN=${VAULT_TOKEN:-}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8055/terrarium/readyz"]
+      <<: *default-healthcheck
+    depends_on:
+      openbao:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # OpenBao (shared secrets management for CB-Tumblebug / MC-Terrarium)
+  #
+  # [Persistent mode] (default)
+  #   - File-based storage — secrets survive restarts
+  #   - Requires one-time initialization + unseal after every restart
+  #   - First run:  ./openbao/openbao-init.sh (or make init-openbao)
+  #   - After restart: ./openbao/openbao-unseal.sh (or make unseal)
+  openbao:
+    image: openbao/openbao:2.5.1
+    container_name: openbao
+    cap_add:
+      - IPC_LOCK
+    networks:
+      - cloud-barista
+    ports:
+      - target: 8200
+        published: 8200
+        protocol: tcp
+    environment:
+      - BAO_ADDR=http://0.0.0.0:8200
+      - SKIP_SETCAP=true
+    # Fix bind-mount ownership (host UID 1000 → container openbao UID 100)
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        chown -R openbao:openbao /openbao/data || { echo "ERROR: chown failed on /openbao/data"; exit 1; }
+        exec docker-entrypoint.sh server -config=/openbao/config/openbao-config.hcl
+    volumes:
+      - ./data/openbao-data:/openbao/data
+      - ./openbao/openbao-config.hcl:/openbao/config/openbao-config.hcl:ro
+    healthcheck:
+      # 'bao status' exit codes:
+      #   0 = unsealed, 1 = sealed but running, 2 = uninitialized (first run)
+      # All three mean the OpenBao process is up and accepting API calls.
+      test: ["CMD", "sh", "-c", "rc=0; bao status || rc=$$?; [ $$rc -le 2 ]"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped

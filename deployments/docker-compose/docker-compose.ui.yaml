@@ -1,0 +1,46 @@
+# Overlay file: extend docker-compose.yaml with the (future) UI dashboard.
+#
+# CM-Beetle, CM-Honeybee, and CM-Damselfly are already active by default in
+# docker-compose.yaml — this overlay only adds the not-yet-built UI, gated
+# behind the "ui" profile so it's excluded from a normal `up`/`build` and is a
+# no-op until CM-Centipede has a ui/ app.
+#
+# Usage:
+#   docker compose -f docker-compose.yaml -f docker-compose.ui.yaml --profile ui up
+
+services:
+  # ============================================================================
+  # CM-Centipede UI (Next.js Dashboard, proxies to backend services)
+  # ----------------------------------------------------------------------------
+  # Placeholder — no ui/ directory exists in this repository yet. Kept
+  # uncommented (rather than fully commented out, which would leave this
+  # file's `services:` empty and invalid) because `profiles: [ui]` already
+  # excludes it from a plain `docker compose up`/`build` — Compose only
+  # resolves this service's build context when --profile ui is passed.
+  # Point `build.context` at a real ui/ app (see cm-beetle's ui/ +
+  # docker-compose.ui.yaml for the pattern this block is modeled on) before
+  # using --profile ui.
+  # ============================================================================
+  cm-centipede-ui:
+    profiles: [ui]
+    build:
+      context: ../../ui
+      dockerfile: Dockerfile
+    image: cloudbaristaorg/cm-centipede-ui:latest
+    container_name: cm-centipede-ui
+    networks:
+      - cloud-barista
+    ports:
+      - "3000:3000"
+    environment:
+      # Resolved server-side via Docker internal DNS from docker-compose.yaml network.
+      - CENTIPEDE_ENDPOINT=http://cm-centipede:8057
+      - BEETLE_ENDPOINT=http://cm-beetle:8056
+      - TUMBLEBUG_ENDPOINT=http://cb-tumblebug:1323
+      - HONEYBEE_ENDPOINT=http://cm-honeybee:8081
+      - DAMSELFLY_ENDPOINT=http://cm-damselfly:8088
+    depends_on:
+      - cm-beetle
+      - cm-honeybee
+      - cm-damselfly
+    restart: always

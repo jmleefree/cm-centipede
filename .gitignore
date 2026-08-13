@@ -1,0 +1,40 @@
+# IDE & Editor
+.idea/
+.vscode/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+log/
+*.history
+
+# Python & Virtual Env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+deployments/docker-compose/cb-tumblebug/init/__pycache__/
+
+# Database & Runtime Data
+*.db
+meta_db/
+
+# Configuration & Secrets
+*.pem
+*.ppk
+*.key
+
+# Deployment & Docker
+.env
+deployments/docker-compose/data
+!deployments/docker-compose/cb-tumblebug/
+
+**/secrets/*
+!**/secrets/.gitkeep
+!**/secrets/README.md
+
+# Backup Files
+*_backup
