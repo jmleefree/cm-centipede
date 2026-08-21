@@ -1,0 +1,84 @@
+services:
+  reverse-proxy:
+    image: "traefik:v3.6"
+    # "docker compose pull reverse-proxy" to get the latest Traefik image minor version update
+    container_name: "traefik"
+    ports:
+      - 80:80
+      - 443:443
+      - 8080:8080
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yaml:/etc/traefik/traefik.yaml
+      - ${HOME}/.cloud-barista/certs/:/certs/
+    networks:
+      # Same network as the routed services (cb-mapui, cb-spider, ...) so
+      # Traefik can reach them by container name.
+      - cloud-barista
+
+  cb-mapui:
+    labels:
+      # Explicitly tell Traefik to expose this container
+      - traefik.enable=true
+      # Define the rule for routing requests to this service
+      # Note - Multiple hosts are supported (e.g., traefik.http.routers.cb-mapui.rule=Host(`cb-mapui.localhost`) || Host(`xxx.xxx.xxx.xxx`))
+      # Warn - (Please be careful) Public IP can be used for the rule (e.g., Host(`xxx.xxx.xxx.xxx`))
+      - traefik.http.routers.cb-mapui.rule=Host(`cb-mapui.localhost`)
+      # Allow request from both HTTP and HTTPS
+      - traefik.http.routers.cb-mapui.entrypoints=web,websecure
+      # Enable HTTPS
+      - traefik.http.routers.cb-mapui.tls=true
+      # Requests to the service are forwarded via HTTP
+      - traefik.http.services.cb-mapui.loadbalancer.server.scheme=http
+      # The port the service listens on
+      - traefik.http.services.cb-mapui.loadbalancer.server.port=1324
+
+  cb-spider:
+    environment:
+      - ADMINWEB=ON
+    labels:
+      # Explicitly tell Traefik to expose this container
+      - traefik.enable=true
+      # Define the rule for routing requests to Spider AdminWeb
+      # Note - Multiple hosts are supported (e.g., traefik.http.routers.cb-spider.rule=Host(`cb-spider.localhost`) || Host(`xxx.xxx.xxx.xxx`))
+      # Warn - (Please be careful) Public IP can be used for the rule (e.g., Host(`xxx.xxx.xxx.xxx`))
+      - traefik.http.routers.cb-spider.rule=Host(`cb-spider.localhost`) && PathPrefix(`/spider/adminweb`)
+      # Allow request from both HTTP and HTTPS
+      - traefik.http.routers.cb-spider.entrypoints=web,websecure
+      # Enable HTTPS
+      - traefik.http.routers.cb-spider.tls=true
+      # Requests to the service are forwarded via HTTP
+      - traefik.http.services.cb-spider.loadbalancer.server.scheme=http
+      # The port the service listens on
+      - traefik.http.services.cb-spider.loadbalancer.server.port=1024
+
+  # ── Examples for future extensions ──────────────────────────────────────────
+  # Uncomment the following blocks to expose other services via Traefik.
+  # Adjust 'Host' rules or 'PathPrefix' as needed.
+
+  # cm-centipede:
+  #   labels:
+  #     - traefik.enable=true
+  #     - traefik.http.routers.cm-centipede.rule=Host(`cm-centipede.localhost`)
+  #     - traefik.http.routers.cm-centipede.entrypoints=web,websecure
+  #     - traefik.http.routers.cm-centipede.tls=true
+  #     - traefik.http.services.cm-centipede.loadbalancer.server.scheme=http
+  #     - traefik.http.services.cm-centipede.loadbalancer.server.port=8057
+
+  # cm-honeybee:
+  #   labels:
+  #     - traefik.enable=true
+  #     - traefik.http.routers.cm-honeybee.rule=Host(`cm-honeybee.localhost`)
+  #     - traefik.http.routers.cm-honeybee.entrypoints=web,websecure
+  #     - traefik.http.routers.cm-honeybee.tls=true
+  #     - traefik.http.services.cm-honeybee.loadbalancer.server.scheme=http
+  #     - traefik.http.services.cm-honeybee.loadbalancer.server.port=8081
+
+  # cb-tumblebug:
+  #   labels:
+  #     - traefik.enable=true
+  #     - traefik.http.routers.cb-tumblebug.rule=Host(`cb-tumblebug.localhost`)
+  #     - traefik.http.routers.cb-tumblebug.entrypoints=web,websecure
+  #     - traefik.http.routers.cb-tumblebug.tls=true
+  #     - traefik.http.services.cb-tumblebug.loadbalancer.server.scheme=http
+  #     - traefik.http.services.cb-tumblebug.loadbalancer.server.port=1323
