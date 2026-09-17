@@ -7,9 +7,11 @@ import (
 )
 
 // ApiResponse is the generic envelope returned by every endpoint.
+//
+// Data has no omitempty so that an empty list still serializes as "data": [].
 type ApiResponse[T any] struct {
 	Success bool   `json:"success"`
-	Data    T      `json:"data,omitempty"`
+	Data    T      `json:"data"`
 	Message string `json:"message,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
