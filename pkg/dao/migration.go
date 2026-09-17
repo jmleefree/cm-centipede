@@ -100,14 +100,47 @@ func GetMigration(id string) (*model.Migration, error) {
 	return &m, nil
 }
 
-// ListMigration returns a paginated list of migrations, optionally filtered by status.
-// Inline connection credentials and the beetleDb password are AES-decrypted in
-// each returned Migration.
-func ListMigration(status string, page, pageSize int) ([]model.Migration, int64, error) {
-	q := db.DB.Model(&model.Migration{})
-	if status != "" {
-		q = q.Where("status = ?", status)
+// applyMigrationFilter adds the status and created_at conditions of f to q.
+// Both list queries go through it so the two endpoints cannot drift apart in
+// what a filter means.
+func applyMigrationFilter(q *gorm.DB, f model.MigrationListFilter) *gorm.DB {
+	if f.Status != "" {
+		q = q.Where("status = ?", f.Status)
 	}
+	// The date bounds are bound as yyyy-mm-dd strings, not as time.Time.
+	// created_at is stored as server-local wall-clock text
+	// ("2026-06-30 17:21:35.564542139+09:00"), so the comparison SQLite does is
+	// lexicographic on that text. A time.Time bound normalised to UTC compares
+	// against a different prefix and matches nothing — with no error to show for
+	// it. Passing the date through as text keeps both sides on one axis, and,
+	// unlike DATE(created_at), leaves the column bare so the created_at index
+	// still applies.
+	if f.DateFrom != "" {
+		q = q.Where("created_at >= ?", f.DateFrom)
+	}
+	if f.DateToExcl != "" {
+		q = q.Where("created_at < ?", f.DateToExcl)
+	}
+	return q
+}
+
+// newMigrationSummaries projects rows into list summaries.
+//
+// Nothing is decrypted here: a summary counts the plan's units instead of
+// carrying the plan, and the counts survive encryption untouched. That is what
+// keeps one unreadable row from failing the whole listing.
+func newMigrationSummaries(items []model.Migration) []model.MigrationSummary {
+	out := make([]model.MigrationSummary, len(items))
+	for i := range items {
+		out[i] = model.NewMigrationSummary(&items[i])
+	}
+	return out
+}
+
+// ListMigration returns a paginated list of migration summaries matching f,
+// ordered by created_at DESC.
+func ListMigration(f model.MigrationListFilter, page, pageSize int) ([]model.MigrationSummary, int64, error) {
+	q := applyMigrationFilter(db.DB.Model(&model.Migration{}), f)
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -119,35 +152,20 @@ func ListMigration(status string, page, pageSize int) ([]model.Migration, int64,
 	if err := q.Order("created_at DESC").Offset(offset).Limit(pageSize).Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
-
-	for i := range items {
-		if err := decryptPlan(&items[i].Plan); err != nil {
-			return nil, 0, fmt.Errorf("decrypt plan[%d]: %w", i, err)
-		}
-	}
-	return items, total, nil
+	return newMigrationSummaries(items), total, nil
 }
 
-// ListAllMigration returns all migrations ordered by created_at DESC,
-// optionally filtered by status. Inline connection credentials and the beetleDb
-// password are AES-decrypted.
-func ListAllMigration(status string) ([]model.Migration, error) {
-	q := db.DB.Model(&model.Migration{})
-	if status != "" {
-		q = q.Where("status = ?", status)
-	}
+// ListAllMigration returns every migration summary matching f, ordered by
+// created_at DESC, without pagination. The caller is responsible for bounding
+// the result — see MigrationListFilter.ApplyDefaultWindow.
+func ListAllMigration(f model.MigrationListFilter) ([]model.MigrationSummary, error) {
+	q := applyMigrationFilter(db.DB.Model(&model.Migration{}), f)
 
 	var items []model.Migration
 	if err := q.Order("created_at DESC").Find(&items).Error; err != nil {
 		return nil, err
 	}
-
-	for i := range items {
-		if err := decryptPlan(&items[i].Plan); err != nil {
-			return nil, fmt.Errorf("decrypt plan[%d]: %w", i, err)
-		}
-	}
-	return items, nil
+	return newMigrationSummaries(items), nil
 }
 
 // UpdateMigrationStatus updates only the status and progress fields, leaving the

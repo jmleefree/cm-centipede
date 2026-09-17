@@ -62,28 +62,47 @@ func CreateMigration(c echo.Context) error {
 	return c.JSON(http.StatusCreated, model.SuccessResponse(*m))
 }
 
+// defaultAllLastDays bounds GET /centipede/migration/all when the caller named
+// no date filter. The paginated endpoint needs no such default: pageSize
+// already bounds it.
+//
+// A constant rather than configuration: how many days are worth returning
+// depends on the deployment's data volume, so this may well belong next to
+// rateLimit in the conf api: section later, but nothing needs it there yet.
+const defaultAllLastDays = 7
+
 // ListMigration godoc
 //
 //	@Summary		List migrations (paginated)
-//	@Description	Returns a paginated list of migrations, optionally filtered by status.
+//	@Description	Returns a paginated list of migration summaries ordered by created_at DESC.
+//	@Description	The response carries planSummary (unit counts per category) in place of the plan itself.
+//	@Description	Date filters compare against created_at and are interpreted in the server's local time zone.
+//	@Description	dateFrom and dateTo may each be used alone for an open-ended range; dateTo includes its own day.
 //	@Tags			migration
 //	@Produce		json
 //	@Param			status		query		string	false	"Filter by status (pending|running|completed|failed|cancelled)"
+//	@Param			dateFrom	query		string	false	"Inclusive lower bound on created_at (yyyy-mm-dd)"
+//	@Param			dateTo		query		string	false	"Inclusive upper bound on created_at (yyyy-mm-dd)"
+//	@Param			lastDays	query		int		false	"Last N calendar days including today (0-3650; 0 means no limit). Cannot be combined with dateFrom or dateTo"
 //	@Param			page		query		int		false	"Page number (default 1)"
 //	@Param			pageSize	query		int		false	"Page size (default 20, max 100)"
-//	@Success		200			{object}	model.ApiResponse[model.ListResponse[model.Migration]]
+//	@Success		200			{object}	model.ApiResponse[model.ListResponse[model.MigrationSummary]]
+//	@Failure		400			{object}	model.ApiResponse[any]
 //	@Failure		500			{object}	model.ApiResponse[any]
 //	@Router			/centipede/migration [get]
 func ListMigration(c echo.Context) error {
-	status := c.QueryParam("status")
+	f, err := model.ParseMigrationListFilter(c)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse(err.Error()))
+	}
 	page, pageSize := model.ParsePageParams(c)
 
-	items, total, err := dao.ListMigration(status, page, pageSize)
+	items, total, err := dao.ListMigration(f, page, pageSize)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, model.SimpleErrorResponse("list migration: "+err.Error()))
 	}
 
-	return c.JSON(http.StatusOK, model.SuccessResponse(model.ListResponse[model.Migration]{
+	return c.JSON(http.StatusOK, model.SuccessResponse(model.ListResponse[model.MigrationSummary]{
 		Total:    total,
 		Page:     page,
 		PageSize: pageSize,
@@ -94,21 +113,40 @@ func ListMigration(c echo.Context) error {
 // ListAllMigration godoc
 //
 //	@Summary		List all migrations without pagination
-//	@Description	Returns every migration record ordered by created_at DESC, optionally filtered by status.
+//	@Description	Returns every matching migration summary ordered by created_at DESC.
+//	@Description	The response carries planSummary (unit counts per category) in place of the plan itself.
+//	@Description	When none of dateFrom, dateTo and lastDays is given, the last 7 calendar days are applied and the response message says so; pass lastDays=0 to lift the limit.
+//	@Description	Date filters compare against created_at and are interpreted in the server's local time zone.
 //	@Tags			migration
 //	@Produce		json
-//	@Param			status	query		string	false	"Filter by status (pending|running|completed|failed|cancelled)"
-//	@Success		200		{object}	model.ApiResponse[[]model.Migration]
-//	@Failure		500		{object}	model.ApiResponse[any]
+//	@Param			status		query		string	false	"Filter by status (pending|running|completed|failed|cancelled)"
+//	@Param			dateFrom	query		string	false	"Inclusive lower bound on created_at (yyyy-mm-dd)"
+//	@Param			dateTo		query		string	false	"Inclusive upper bound on created_at (yyyy-mm-dd)"
+//	@Param			lastDays	query		int		false	"Last N calendar days including today (0-3650; 0 means no limit, default 7). Cannot be combined with dateFrom or dateTo"
+//	@Success		200			{object}	model.ApiResponse[[]model.MigrationSummary]
+//	@Failure		400			{object}	model.ApiResponse[any]
+//	@Failure		500			{object}	model.ApiResponse[any]
 //	@Router			/centipede/migration/all [get]
 func ListAllMigration(c echo.Context) error {
-	status := c.QueryParam("status")
+	f, err := model.ParseMigrationListFilter(c)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse(err.Error()))
+	}
+	// The one asymmetry between the two list endpoints, kept at the call site
+	// rather than inside the parser so that it is visible here.
+	defaulted := f.ApplyDefaultWindow(defaultAllLastDays)
 
-	items, err := dao.ListAllMigration(status)
+	items, err := dao.ListAllMigration(f)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, model.SimpleErrorResponse("list all migration: "+err.Error()))
 	}
 
+	if defaulted {
+		// Said out loud because a silent default leaves the caller unable to
+		// tell "no migrations" from "none in the last 7 days".
+		return c.JSON(http.StatusOK, model.SuccessResponseWithMessage(items, fmt.Sprintf(
+			"no date filter given; defaulted to the last %d days (use lastDays=0 for all)", defaultAllLastDays)))
+	}
 	return c.JSON(http.StatusOK, model.SuccessResponse(items))
 }
 

@@ -1,7 +1,13 @@
 package model
 
 import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
+
+	"github.com/labstack/echo/v4"
 
 	targetmodel "github.com/cloud-barista/cm-centipede/dmdl/target-model"
 )
@@ -36,10 +42,13 @@ type Migration struct {
 	ValidationMessage string                 `gorm:"column:validation_message"             json:"validationMessage,omitempty"`
 	ValidationDetails []ValidationDetailItem `gorm:"column:validation_details;serializer:json" json:"validationDetails,omitempty"`
 
-	StartedAt   *time.Time `gorm:"column:started_at"   json:"startedAt,omitempty"`
-	CompletedAt *time.Time `gorm:"column:completed_at" json:"completedAt,omitempty"`
-	CreatedAt   time.Time  `gorm:"column:created_at"   json:"createdAt"`
-	UpdatedAt   time.Time  `gorm:"column:updated_at"   json:"updatedAt"`
+	StartedAt   *time.Time `gorm:"column:started_at"         json:"startedAt,omitempty"`
+	CompletedAt *time.Time `gorm:"column:completed_at"       json:"completedAt,omitempty"`
+	// CreatedAt is indexed because it is both the list ordering key and the only
+	// column the date filters compare against: without the index every list call
+	// is a full scan plus a sort.
+	CreatedAt time.Time `gorm:"column:created_at;index" json:"createdAt"`
+	UpdatedAt time.Time `gorm:"column:updated_at"       json:"updatedAt"`
 }
 
 // MigrationLog records the result of a single item migration within a migration.
@@ -133,6 +142,210 @@ type RetryReq struct {
 type RetryResponse struct {
 	OriginalMigrationID string    `json:"originalMigrationId"`
 	NewMigration        Migration `json:"newMigration"`
+}
+
+// ── Migration list projection ────────────────────────────────────────────────
+
+// PlanSummary counts the migration units of a plan by category. It is what the
+// list endpoints return in place of the plan itself, so that a caller can still
+// tell a filesystem migration from a database one without the response carrying
+// connection credentials.
+type PlanSummary struct {
+	FileSystems    int `json:"fileSystems"`
+	ObjectStorages int `json:"objectStorages"`
+	Databases      int `json:"databases"`
+}
+
+// MigrationSummary is the list projection of Migration: every field of the
+// record except Plan, which is replaced by PlanSummary.
+//
+// The list endpoints return this rather than Migration for three reasons: the
+// plan holds plaintext SSH keys and passwords once decrypted, decrypting it per
+// row is the dominant cost of a list call, and one undecryptable row used to
+// fail the whole listing.
+type MigrationSummary struct {
+	ID          string      `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	PlanSummary PlanSummary `json:"planSummary"`
+
+	DBMSOnFailure string `json:"dbmsOnFailure,omitempty"`
+
+	Status        string `json:"status"`
+	StatusMessage string `json:"statusMessage,omitempty"`
+
+	TotalItems       int64 `json:"totalItems"`
+	ProcessedItems   int64 `json:"processedItems"`
+	FailedItems      int64 `json:"failedItems"`
+	TotalBytes       int64 `json:"totalBytes"`
+	TransferredBytes int64 `json:"transferredBytes"`
+
+	ValidationStatus  string                 `json:"validationStatus,omitempty"`
+	ValidationMessage string                 `json:"validationMessage,omitempty"`
+	ValidationDetails []ValidationDetailItem `json:"validationDetails,omitempty"`
+
+	StartedAt   *time.Time `json:"startedAt,omitempty"`
+	CompletedAt *time.Time `json:"completedAt,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+}
+
+// NewMigrationSummary projects m into a MigrationSummary.
+//
+// The unit counts are taken from the stored plan without decrypting it:
+// encryption substitutes the connection inside each unit and never adds or
+// removes a unit, so len() over an encrypted plan gives the same numbers.
+func NewMigrationSummary(m *Migration) MigrationSummary {
+	p := &m.Plan.TargetDataMigrationModel
+	return MigrationSummary{
+		ID:          m.ID,
+		Name:        m.Name,
+		Description: m.Description,
+		PlanSummary: PlanSummary{
+			FileSystems:    len(p.FileSystems),
+			ObjectStorages: len(p.ObjectStorages),
+			Databases:      len(p.Databases),
+		},
+		DBMSOnFailure:     m.DBMSOnFailure,
+		Status:            m.Status,
+		StatusMessage:     m.StatusMessage,
+		TotalItems:        m.TotalItems,
+		ProcessedItems:    m.ProcessedItems,
+		FailedItems:       m.FailedItems,
+		TotalBytes:        m.TotalBytes,
+		TransferredBytes:  m.TransferredBytes,
+		ValidationStatus:  m.ValidationStatus,
+		ValidationMessage: m.ValidationMessage,
+		ValidationDetails: m.ValidationDetails,
+		StartedAt:         m.StartedAt,
+		CompletedAt:       m.CompletedAt,
+		CreatedAt:         m.CreatedAt,
+		UpdatedAt:         m.UpdatedAt,
+	}
+}
+
+// ── Migration list filter ────────────────────────────────────────────────────
+
+const (
+	// DateParamLayout is the wire format of dateFrom and dateTo.
+	DateParamLayout = "2006-01-02"
+
+	// MaxLastDays bounds lastDays. Ten years is well past any window a caller
+	// would ask for and keeps a typo from turning into an unbounded scan.
+	MaxLastDays = 3650
+)
+
+// MigrationListFilter is the parsed form of the query parameters shared by
+// GET /centipede/migration and GET /centipede/migration/all.
+//
+// The date bounds are kept as yyyy-mm-dd strings rather than time.Time on
+// purpose — see applyMigrationFilter in the dao package for why.
+type MigrationListFilter struct {
+	// Status filters on the status column. Empty means no filter; an unknown
+	// value is not rejected and simply matches nothing.
+	Status string
+
+	// DateFrom is the inclusive lower bound on created_at. Empty means none.
+	DateFrom string
+
+	// DateToExcl is the *exclusive* upper bound on created_at: the requested
+	// dateTo plus one day, since dateTo includes its own day. Empty means none.
+	DateToExcl string
+
+	// DateParamGiven records that the request carried at least one of dateFrom,
+	// dateTo or lastDays — lastDays=0 included, which asks for no window at
+	// all. ApplyDefaultWindow leaves such a filter untouched.
+	DateParamGiven bool
+}
+
+// ParseMigrationListFilter reads the list filter query parameters, following the
+// same shape as ParsePageParams.
+//
+// It returns an error instead of ignoring a malformed parameter: a date filter
+// that silently dropped out would return *more* rows than asked for, and extra
+// rows look like data rather than like a failure.
+//
+// The parser is pure — it injects no defaults. GET /centipede/migration/all
+// applies its own default window on top of the result.
+func ParseMigrationListFilter(c echo.Context) (MigrationListFilter, error) {
+	f := MigrationListFilter{Status: c.QueryParam("status")}
+
+	rawFrom := strings.TrimSpace(c.QueryParam("dateFrom"))
+	rawTo := strings.TrimSpace(c.QueryParam("dateTo"))
+	rawLastDays := strings.TrimSpace(c.QueryParam("lastDays"))
+
+	if rawLastDays != "" && (rawFrom != "" || rawTo != "") {
+		return f, errors.New("lastDays cannot be combined with dateFrom or dateTo")
+	}
+
+	if rawLastDays != "" {
+		n, err := strconv.Atoi(rawLastDays)
+		if err != nil || n < 0 || n > MaxLastDays {
+			return f, fmt.Errorf("lastDays must be an integer between 0 and %d (got %q)", MaxLastDays, rawLastDays)
+		}
+		f.DateParamGiven = true
+		if n > 0 {
+			f.DateFrom, f.DateToExcl = lastDaysWindow(n, time.Now())
+		}
+		return f, nil
+	}
+
+	var from, to time.Time
+	if rawFrom != "" {
+		var err error
+		if from, err = time.ParseInLocation(DateParamLayout, rawFrom, time.Local); err != nil {
+			return f, fmt.Errorf("dateFrom must be yyyy-mm-dd (got %q)", rawFrom)
+		}
+	}
+	if rawTo != "" {
+		var err error
+		if to, err = time.ParseInLocation(DateParamLayout, rawTo, time.Local); err != nil {
+			return f, fmt.Errorf("dateTo must be yyyy-mm-dd (got %q)", rawTo)
+		}
+	}
+	if rawFrom != "" && rawTo != "" && from.After(to) {
+		return f, errors.New("dateFrom must not be after dateTo")
+	}
+
+	if rawFrom != "" {
+		f.DateFrom = from.Format(DateParamLayout)
+		f.DateParamGiven = true
+	}
+	if rawTo != "" {
+		f.DateToExcl = to.AddDate(0, 0, 1).Format(DateParamLayout)
+		f.DateParamGiven = true
+	}
+	return f, nil
+}
+
+// ApplyDefaultWindow fills in a lastDays window when the request named no date
+// filter at all, and reports whether it did. A filter that already carries one —
+// including the empty window lastDays=0 asks for — is left alone.
+//
+// It exists for GET /centipede/migration/all, which is otherwise unbounded;
+// the paginated endpoint is already bounded by pageSize and does not call it.
+func (f *MigrationListFilter) ApplyDefaultWindow(lastDays int) bool {
+	if f.DateParamGiven || lastDays <= 0 {
+		return false
+	}
+	f.DateFrom, f.DateToExcl = lastDaysWindow(lastDays, time.Now())
+	f.DateParamGiven = true
+	return true
+}
+
+// lastDaysWindow converts a lastDays count into [from, toExcl) as yyyy-mm-dd
+// dates in the server's local zone, counting calendar days and including today:
+// lastDays=1 is today alone, lastDays=7 is today and the six days before it.
+//
+// The bounds land on midnight rather than on "now minus N×24h" so that repeated
+// calls on the same day return the same rows — a polling screen must not see
+// its window slide underneath it — and so that lastDays and dateFrom/dateTo
+// measure on the same calendar-day axis.
+func lastDaysWindow(lastDays int, now time.Time) (from, toExcl string) {
+	y, m, d := now.Date()
+	today := time.Date(y, m, d, 0, 0, 0, 0, now.Location())
+	return today.AddDate(0, 0, -(lastDays - 1)).Format(DateParamLayout),
+		today.AddDate(0, 0, 1).Format(DateParamLayout)
 }
 
 // ── Validation response models ───────────────────────────────────────────────

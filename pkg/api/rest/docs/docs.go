@@ -20,7 +20,7 @@ const docTemplate = `{
     "paths": {
         "/centipede/migration": {
             "get": {
-                "description": "Returns a paginated list of migrations, optionally filtered by status.",
+                "description": "Returns a paginated list of migration summaries ordered by created_at DESC.\nThe response carries planSummary (unit counts per category) in place of the plan itself.\nDate filters compare against created_at and are interpreted in the server's local time zone.\ndateFrom and dateTo may each be used alone for an open-ended range; dateTo includes its own day.",
                 "produces": [
                     "application/json"
                 ],
@@ -33,6 +33,24 @@ const docTemplate = `{
                         "type": "string",
                         "description": "Filter by status (pending|running|completed|failed|cancelled)",
                         "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inclusive lower bound on created_at (yyyy-mm-dd)",
+                        "name": "dateFrom",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inclusive upper bound on created_at (yyyy-mm-dd)",
+                        "name": "dateTo",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Last N calendar days including today (0-3650; 0 means no limit). Cannot be combined with dateFrom or dateTo",
+                        "name": "lastDays",
                         "in": "query"
                     },
                     {
@@ -52,7 +70,13 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ApiResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_Migration"
+                            "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ApiResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_MigrationSummary"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ApiResponse-any"
                         }
                     },
                     "500": {
@@ -110,7 +134,7 @@ const docTemplate = `{
         },
         "/centipede/migration/all": {
             "get": {
-                "description": "Returns every migration record ordered by created_at DESC, optionally filtered by status.",
+                "description": "Returns every matching migration summary ordered by created_at DESC.\nThe response carries planSummary (unit counts per category) in place of the plan itself.\nWhen none of dateFrom, dateTo and lastDays is given, the last 7 calendar days are applied and the response message says so; pass lastDays=0 to lift the limit.\nDate filters compare against created_at and are interpreted in the server's local time zone.",
                 "produces": [
                     "application/json"
                 ],
@@ -124,13 +148,37 @@ const docTemplate = `{
                         "description": "Filter by status (pending|running|completed|failed|cancelled)",
                         "name": "status",
                         "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inclusive lower bound on created_at (yyyy-mm-dd)",
+                        "name": "dateFrom",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inclusive upper bound on created_at (yyyy-mm-dd)",
+                        "name": "dateTo",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Last N calendar days including today (0-3650; 0 means no limit, default 7). Cannot be combined with dateFrom or dateTo",
+                        "name": "lastDays",
+                        "in": "query"
                     }
                 ],
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ApiResponse-array_github_com_cloud-barista_cm-centipede_pkg_api_rest_model_Migration"
+                            "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ApiResponse-array_github_com_cloud-barista_cm-centipede_pkg_api_rest_model_MigrationSummary"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ApiResponse-any"
                         }
                     },
                     "500": {
@@ -1699,13 +1747,13 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ApiResponse-array_github_com_cloud-barista_cm-centipede_pkg_api_rest_model_Migration": {
+        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ApiResponse-array_github_com_cloud-barista_cm-centipede_pkg_api_rest_model_MigrationSummary": {
             "type": "object",
             "properties": {
                 "data": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.Migration"
+                        "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.MigrationSummary"
                     }
                 },
                 "error": {
@@ -1736,11 +1784,11 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ApiResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_Migration": {
+        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ApiResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_MigrationLog": {
             "type": "object",
             "properties": {
                 "data": {
-                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_Migration"
+                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_MigrationLog"
                 },
                 "error": {
                     "type": "string"
@@ -1753,11 +1801,11 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ApiResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_MigrationLog": {
+        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ApiResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_MigrationSummary": {
             "type": "object",
             "properties": {
                 "data": {
-                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_MigrationLog"
+                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_MigrationSummary"
                 },
                 "error": {
                     "type": "string"
@@ -1881,13 +1929,13 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_Migration": {
+        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_MigrationLog": {
             "type": "object",
             "properties": {
                 "items": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.Migration"
+                        "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.MigrationLog"
                     }
                 },
                 "page": {
@@ -1901,13 +1949,13 @@ const docTemplate = `{
                 }
             }
         },
-        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_MigrationLog": {
+        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ListResponse-github_com_cloud-barista_cm-centipede_pkg_api_rest_model_MigrationSummary": {
             "type": "object",
             "properties": {
                 "items": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.MigrationLog"
+                        "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.MigrationSummary"
                     }
                 },
                 "page": {
@@ -1932,6 +1980,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "createdAt": {
+                    "description": "CreatedAt is indexed because it is both the list ordering key and the only\ncolumn the date filters compare against: without the index every list call\nis a full scan plus a sort.",
                     "type": "string"
                 },
                 "dbmsOnFailure": {
@@ -2036,6 +2085,85 @@ const docTemplate = `{
                 "targetCreated": {
                     "description": "TargetCreated records that this item's target database did not exist before\nthe migration and does because of it, which is what decides whether a failure\ndropped the database or emptied it. DBMS items only.\n\nIt is not a record of who ran a DDL statement. On MongoDB nobody does: a\ndatabase begins to exist when the restore writes its first collection, and\nthe flag is true there all the same, because dropping is still what undoing\nthe item means.",
                     "type": "boolean"
+                }
+            }
+        },
+        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.MigrationSummary": {
+            "type": "object",
+            "properties": {
+                "completedAt": {
+                    "type": "string"
+                },
+                "createdAt": {
+                    "type": "string"
+                },
+                "dbmsOnFailure": {
+                    "type": "string"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "failedItems": {
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "planSummary": {
+                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.PlanSummary"
+                },
+                "processedItems": {
+                    "type": "integer"
+                },
+                "startedAt": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "statusMessage": {
+                    "type": "string"
+                },
+                "totalBytes": {
+                    "type": "integer"
+                },
+                "totalItems": {
+                    "type": "integer"
+                },
+                "transferredBytes": {
+                    "type": "integer"
+                },
+                "updatedAt": {
+                    "type": "string"
+                },
+                "validationDetails": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ValidationDetailItem"
+                    }
+                },
+                "validationMessage": {
+                    "type": "string"
+                },
+                "validationStatus": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.PlanSummary": {
+            "type": "object",
+            "properties": {
+                "databases": {
+                    "type": "integer"
+                },
+                "fileSystems": {
+                    "type": "integer"
+                },
+                "objectStorages": {
+                    "type": "integer"
                 }
             }
         },
