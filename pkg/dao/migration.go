@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 
-	commonmodel "github.com/cloud-barista/cm-centipede/dmdl/common-model"
-	targetmodel "github.com/cloud-barista/cm-centipede/dmdl/target-model"
 	"github.com/cloud-barista/cm-centipede/pkg/api/rest/model"
 	"github.com/cloud-barista/cm-centipede/pkg/connsec"
 	"github.com/cloud-barista/cm-centipede/pkg/db"
@@ -16,86 +14,32 @@ import (
 // migration is currently in the "running" state (e.g. delete while running).
 var ErrMigrationRunning = errors.New("migration is running")
 
-// ─── plan encryption helpers ─────────────────────────────────────────────────
-
-// applyRef runs fn over a single ConnectionRef in-place.
-func applyRef(ref *commonmodel.ConnectionRef, fn func(commonmodel.ConnectionRef) (commonmodel.ConnectionRef, error)) error {
-	out, err := fn(*ref)
-	if err != nil {
-		return err
-	}
-	*ref = out
-	return nil
-}
-
-// transformPlan applies fn to every source and destination ConnectionRef across
-// all migration units (filesystem/objectStorage/db) in-place. Sensitive inline
-// credentials and db-reference passwords are (en|de)crypted; identifier-only refs
-// pass through unchanged (see connsec).
-func transformPlan(plan *targetmodel.TargetDataMigrationModel, fn func(commonmodel.ConnectionRef) (commonmodel.ConnectionRef, error)) error {
-	p := &plan.TargetDataMigrationModel
-	for i := range p.FileSystems {
-		if err := applyRef(&p.FileSystems[i].SrcConnection, fn); err != nil {
-			return fmt.Errorf("fileSystems[%d] src: %w", i, err)
-		}
-		if err := applyRef(&p.FileSystems[i].DstConnection, fn); err != nil {
-			return fmt.Errorf("fileSystems[%d] dst: %w", i, err)
-		}
-	}
-	for i := range p.ObjectStorages {
-		if err := applyRef(&p.ObjectStorages[i].SrcConnection, fn); err != nil {
-			return fmt.Errorf("objectStorages[%d] src: %w", i, err)
-		}
-		if err := applyRef(&p.ObjectStorages[i].DstConnection, fn); err != nil {
-			return fmt.Errorf("objectStorages[%d] dst: %w", i, err)
-		}
-	}
-	for i := range p.Databases {
-		if err := applyRef(&p.Databases[i].SrcConnection, fn); err != nil {
-			return fmt.Errorf("dbs[%d] src: %w", i, err)
-		}
-		if err := applyRef(&p.Databases[i].DstConnection, fn); err != nil {
-			return fmt.Errorf("dbs[%d] dst: %w", i, err)
-		}
-	}
-	return nil
-}
-
-// encryptPlan AES-encrypts all inline credentials / db-ref passwords in a plan
-// in-place. The plan must contain plaintext credentials (as returned by the
-// business logic layer).
-func encryptPlan(plan *targetmodel.TargetDataMigrationModel) error {
-	return transformPlan(plan, connsec.EncryptRef)
-}
-
-// decryptPlan AES-decrypts all inline credentials / db-ref passwords in a plan
-// in-place.
-func decryptPlan(plan *targetmodel.TargetDataMigrationModel) error {
-	return transformPlan(plan, connsec.DecryptRef)
-}
-
 // ─── Migration ───────────────────────────────────────────────────────────────
 
 // CreateMigration persists a new Migration.
+//
 // Inline connection credentials and the beetleDb password in the plan are
-// AES-encrypted before writing.
+// encrypted before writing. The call is idempotent in practice: a plan that
+// arrived from POST /plans/target is already ciphertext and is stored as it
+// came, while a hand-written plaintext plan is sealed here.
 func CreateMigration(m *model.Migration) error {
-	if err := encryptPlan(&m.Plan); err != nil {
+	if err := connsec.EncryptPlan(&m.Plan); err != nil {
 		return fmt.Errorf("encrypt plan: %w", err)
 	}
 	return db.DB.Create(m).Error
 }
 
-// GetMigration returns the Migration with the given ID.
-// Inline connection credentials and the beetleDb password are AES-decrypted
-// before returning.
+// GetMigration returns the Migration with the given ID, its plan still
+// encrypted.
+//
+// Nothing is decrypted here. The migration resolvers decrypt one ref at a time
+// as they build each transfer, so a plan decrypted this early would only mean
+// plaintext credentials sitting in every caller — including the ones whose
+// answer goes straight into an HTTP response.
 func GetMigration(id string) (*model.Migration, error) {
 	var m model.Migration
 	if err := db.DB.First(&m, "id = ?", id).Error; err != nil {
 		return nil, err
-	}
-	if err := decryptPlan(&m.Plan); err != nil {
-		return nil, fmt.Errorf("decrypt plan: %w", err)
 	}
 	return &m, nil
 }
@@ -192,17 +136,6 @@ func UpdateMigrationValidation(m *model.Migration) error {
 	return db.DB.Model(&model.Migration{}).Where("id = ?", m.ID).
 		Select("validation_status", "validation_message", "validation_details").
 		Updates(m).Error
-}
-
-// UpdateMigration saves all fields of m.
-// Inline connection credentials and the beetleDb password in the plan are
-// AES-encrypted before writing.
-// Callers must pass decrypted credentials (as returned by GetMigration).
-func UpdateMigration(m *model.Migration) error {
-	if err := encryptPlan(&m.Plan); err != nil {
-		return fmt.Errorf("encrypt plan: %w", err)
-	}
-	return db.DB.Save(m).Error
 }
 
 // DeleteMigration deletes the Migration with the given ID.

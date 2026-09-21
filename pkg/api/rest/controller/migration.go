@@ -10,7 +10,9 @@ import (
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
 
+	commonmodel "github.com/cloud-barista/cm-centipede/dmdl/common-model"
 	"github.com/cloud-barista/cm-centipede/pkg/api/rest/model"
+	"github.com/cloud-barista/cm-centipede/pkg/connsec"
 	migrationpkg "github.com/cloud-barista/cm-centipede/pkg/core/migration"
 	"github.com/cloud-barista/cm-centipede/pkg/dao"
 )
@@ -45,6 +47,31 @@ func CreateMigration(c echo.Context) error {
 				model.DBMSOnFailureCleanup, model.DBMSOnFailureKeep, req.DBMSOnFailure)))
 	}
 
+	// The plan arrives as POST /plans/target answered it, so both checks below
+	// are about a plan that was edited, hand-written, or issued elsewhere.
+	// Execution is asynchronous: anything not caught here surfaces as a
+	// half-finished migration rather than as a failed request.
+
+	// Structure first. A ref whose sub-struct does not match its source is
+	// invisible to the decryptability check — there are no fields to decrypt —
+	// so checking that first would report the wrong problem.
+	if err := connsec.ForEachRef(&req.Plan, func(label string, ref *commonmodel.ConnectionRef) error {
+		if msg := validateConnectionRef(*ref); msg != "" {
+			return fmt.Errorf("%s: %s", label, msg)
+		}
+		return nil
+	}); err != nil {
+		return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse("plan "+err.Error()))
+	}
+
+	// Then whether this server can actually open what it was handed.
+	if err := connsec.VerifyPlanDecryptable(req.Plan); err != nil {
+		return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse(
+			"plan: this server cannot decrypt the credentials it carries — the plan was issued "+
+				"by another cm-centipede instance, or before the encryption passphrase changed. "+
+				"Re-run POST /centipede/plans/target to get one this server can use: "+err.Error()))
+	}
+
 	m := &model.Migration{
 		ID:            uuid.New().String(),
 		Name:          req.Name,
@@ -59,6 +86,15 @@ func CreateMigration(c echo.Context) error {
 
 	go migrationpkg.DefaultExecutor.Execute(m.ID)
 
+	// The record is on its way out, not back into the database, so the plan it
+	// carries is masked like any other read. The caller already holds the plan
+	// it sent; echoing the credentials back only puts them somewhere else.
+	//
+	// Masked in place: the row is already written and the executor reloads it by
+	// ID, so nothing downstream reads m.Plan again.
+	if err := connsec.MaskPlan(&m.Plan); err != nil {
+		return c.JSON(http.StatusInternalServerError, model.SimpleErrorResponse("mask plan: "+err.Error()))
+	}
 	return c.JSON(http.StatusCreated, model.SuccessResponse(*m))
 }
 
@@ -172,6 +208,13 @@ func GetMigration(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, model.SimpleErrorResponse("get migration: "+err.Error()))
 	}
 
+	// Masked rather than left as ciphertext: nothing feeds this response back
+	// into the API, so there is nothing to round-trip, and a value that cannot
+	// be replayed beats one that can. dao hands back a fresh record each call,
+	// so masking it in place affects nothing else.
+	if err := connsec.MaskPlan(&m.Plan); err != nil {
+		return c.JSON(http.StatusInternalServerError, model.SimpleErrorResponse("mask plan: "+err.Error()))
+	}
 	return c.JSON(http.StatusOK, model.SuccessResponse(*m))
 }
 
@@ -226,6 +269,9 @@ func CancelMigration(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, model.SimpleErrorResponse("get migration after cancel: "+err.Error()))
 	}
 
+	if err := connsec.MaskPlan(&m.Plan); err != nil {
+		return c.JSON(http.StatusInternalServerError, model.SimpleErrorResponse("mask plan: "+err.Error()))
+	}
 	return c.JSON(http.StatusOK, model.SuccessResponse(*m))
 }
 
@@ -267,6 +313,12 @@ func RetryMigration(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, model.SimpleErrorResponse("retry migration: "+msg))
 	}
 
+	// NewMigration carries the plan it was retried with. Masked for the same
+	// reason as every other read: the record is already stored and the retry
+	// goroutine reloads it by ID.
+	if err := connsec.MaskPlan(&newMig.Plan); err != nil {
+		return c.JSON(http.StatusInternalServerError, model.SimpleErrorResponse("mask plan: "+err.Error()))
+	}
 	return c.JSON(http.StatusCreated, model.SuccessResponse(model.RetryResponse{
 		OriginalMigrationID: id,
 		NewMigration:        *newMig,

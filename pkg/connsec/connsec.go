@@ -8,8 +8,17 @@
 // safe to call on plan build even if the request already carried ciphertext.
 // Decrypt passes through any value lacking the "enc:" prefix.
 //
-// Encryption happens when a plan/migration is persisted; decryption happens in
-// the migration resolvers just before building storagex/dbmsx configs.
+// Ciphertext is the shared wire and storage format, and plaintext exists only
+// where a credential is about to be used:
+//
+//   - POST /plans/target takes plaintext (a person types it) and answers with
+//     ciphertext, which the caller pastes into POST /migration unchanged.
+//   - The plan is stored exactly as it arrived; EncryptPlan's idempotence means
+//     nothing is resealed on the way in.
+//   - The migration resolvers decrypt one ref at a time, immediately before
+//     building a storagex/dbmsx config.
+//   - Read-only responses carry neither: MaskPlan replaces the values with
+//     "***", because nothing feeds a GET response back into the API.
 package connsec
 
 import (

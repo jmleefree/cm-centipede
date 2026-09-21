@@ -2,11 +2,13 @@ package controller
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	commonmodel "github.com/cloud-barista/cm-centipede/dmdl/common-model"
 	targetmodel "github.com/cloud-barista/cm-centipede/dmdl/target-model"
 	"github.com/cloud-barista/cm-centipede/pkg/api/rest/model"
+	"github.com/cloud-barista/cm-centipede/pkg/connsec"
 	"github.com/cloud-barista/cm-centipede/pkg/core/plan"
 	"github.com/labstack/echo/v4"
 )
@@ -85,6 +87,15 @@ func validateConnectionRef(ref commonmodel.ConnectionRef) string {
 		default:
 			return "db.accessType must be 'direct' or 'sshTunnel'"
 		}
+
+	default:
+		// Without this the switch accepted anything it did not recognise,
+		// including the empty string: the `oneof` tag on Source looks like it
+		// covers that, but no validator is registered on the echo instance, so
+		// the tags never run.
+		return fmt.Sprintf(
+			"unknown source %q (must be one of: honeybee, beetleSsh, beetleObjectStorage, beetleDb, ssh, minio, db)",
+			ref.Source)
 	}
 	return ""
 }
@@ -137,6 +148,15 @@ func GetTargetPlan(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse(err.Error()))
 		}
 		return c.JSON(http.StatusInternalServerError, model.SimpleErrorResponse(err.Error()))
+	}
+
+	// The request carried plaintext because a person typed it; the answer does
+	// not, because the caller pastes it into POST /migration unchanged and it
+	// lives in a terminal, a file or a log in between. Encrypting here rather
+	// than inside the builder keeps the plan layer working in plaintext.
+	if err := connsec.EncryptPlan(&result); err != nil {
+		return c.JSON(http.StatusInternalServerError,
+			model.SimpleErrorResponse("encrypt plan: "+err.Error()))
 	}
 
 	return c.JSON(http.StatusOK, model.SuccessResponse[targetmodel.TargetDataMigrationModel](result))

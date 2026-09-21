@@ -40,13 +40,27 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to initialise RSA key")
 	}
 
-	// 5. AES key (connection credential encryption, see pkg/connsec)
-	cryptoutil.InitKey()
+	// 5. Encryption salt (per-deployment, stored alongside the data it protects)
+	salt, err := db.EncryptionSalt()
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to load the encryption salt")
+	}
 
-	// 6. Mark ready and start HTTP server (blocks until SIGINT/SIGTERM)
+	// 6. AES key (connection credential encryption, see pkg/connsec)
+	if err := cryptoutil.InitKey(salt); err != nil {
+		log.Fatal().Err(err).Msg("failed to initialise the AES key")
+	}
+
+	// 7. Key canary — refuse to run against a database encrypted with another
+	// key, rather than failing once per migration later on.
+	if err := db.VerifyEncryptionCanary(); err != nil {
+		log.Fatal().Err(err).Msg("encryption key mismatch")
+	}
+
+	// 8. Mark ready and start HTTP server (blocks until SIGINT/SIGTERM)
 	controller.IsReady = true
 	rest.Start()
 
-	// 7. Cleanup after graceful shutdown
+	// 9. Cleanup after graceful shutdown
 	db.Close()
 }

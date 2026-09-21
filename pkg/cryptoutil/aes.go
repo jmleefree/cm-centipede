@@ -7,12 +7,11 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
+	"golang.org/x/crypto/scrypt"
+
 	"github.com/cloud-barista/cm-centipede/pkg/config"
-	"github.com/rs/zerolog/log"
 )
 
 const encPrefix = "enc:"
@@ -74,55 +73,55 @@ func Decrypt(encrypted string, key []byte) (string, error) {
 	return string(plaintext), nil
 }
 
-// InitKey loads the AES-256 key from config.Conf.Encryption.SecretKey (base64).
-// If the key is unset a fresh 32-byte key is generated, base64-encoded, written
-// back to cm-centipede.yaml, and returned.
-func InitKey() []byte {
-	encoded := config.Conf.Encryption.SecretKey
+// minPassphraseLen is a floor, not an entropy policy: it blocks "1234" without
+// pretending to measure strength. scrypt is what makes a short passphrase
+// expensive to attack.
+const minPassphraseLen = 12
 
-	if encoded == "" {
-		raw := make([]byte, 32)
-		if _, err := io.ReadFull(rand.Reader, raw); err != nil {
-			panic("generate AES key: " + err.Error())
-		}
-		encoded = base64.StdEncoding.EncodeToString(raw)
-		config.Conf.Encryption.SecretKey = encoded
-		persistSecretKey(encoded)
-		log.Info().Msg("AES-256 key generated and saved to config")
-		AESKey = raw
-		return raw
+// scrypt cost parameters. N=32768 costs roughly 100 ms once at startup — and is
+// what an offline attacker pays per guess against a stolen database file.
+const (
+	scryptN = 1 << 15
+	scryptR = 8
+	scryptP = 1
+)
+
+// InitKey derives the AES-256 key from config.Conf.Encryption.SecretKey.
+//
+// The operator picks the value: any passphrase is accepted and run through
+// scrypt to produce the 32 bytes AES-256 needs. Nothing is padded and nothing is
+// truncated, so nothing the operator typed is silently discarded or silently
+// ignored — a key nobody chose is the failure this replaces.
+//
+// The key is never generated and never written back. A key this server invents
+// is a key the operator does not have, and every credential encrypted under it
+// dies with the container. An absent value is a startup failure, reported here
+// and acted on by the caller.
+//
+// salt is this deployment's own salt, from db.EncryptionSalt. It is what keeps
+// the derived key specific to this database even when two deployments share a
+// passphrase.
+func InitKey(salt []byte) error {
+	v := strings.TrimSpace(config.Conf.Encryption.SecretKey)
+
+	if v == "" {
+		return fmt.Errorf(
+			"encryption.secretKey is not set — cm-centipede will not start without it.\n" +
+				"  Set centipede.encryption.secretKey in conf/cm-centipede.yaml to any\n" +
+				"  passphrase you choose, or export CENTIPEDE_ENCRYPTION_SECRET_KEY.\n" +
+				"  Keep this value: losing it, or changing it, makes every stored\n" +
+				"  credential unrecoverable.")
 	}
 
-	raw, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || len(raw) != 32 {
-		// Treat the raw string as the key (pad/truncate to 32 bytes).
-		raw = make([]byte, 32)
-		copy(raw, []byte(encoded))
-		log.Warn().Msg("encryption.secretKey is not valid base64-32; using raw bytes")
+	if len(v) < minPassphraseLen {
+		return fmt.Errorf(
+			"encryption.secretKey must be at least %d characters (got %d)", minPassphraseLen, len(v))
 	}
-	AESKey = raw
-	return raw
-}
 
-// persistSecretKey writes the generated key back into the YAML config file.
-func persistSecretKey(encoded string) {
-	candidates := []string{
-		"./conf/cm-centipede.yaml",
-		filepath.Join(config.RootPath(), "conf", "cm-centipede.yaml"),
+	key, err := scrypt.Key([]byte(v), salt, scryptN, scryptR, scryptP, 32)
+	if err != nil {
+		return fmt.Errorf("derive encryption key: %w", err)
 	}
-	for _, p := range candidates {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		updated := strings.Replace(string(data), `secretKey: ""`, `secretKey: `+encoded, 1)
-		if updated == string(data) {
-			updated = strings.Replace(string(data), "secretKey: ''", "secretKey: "+encoded, 1)
-		}
-		if err := os.WriteFile(p, []byte(updated), 0600); err != nil {
-			log.Warn().Err(err).Str("path", p).Msg("failed to persist AES key to config")
-		}
-		return
-	}
-	log.Warn().Msg("config file not found; AES key not persisted")
+	AESKey = key
+	return nil
 }

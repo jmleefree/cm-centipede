@@ -60,7 +60,7 @@ func Close() {
 
 // autoMigrate runs GORM AutoMigrate for all persistent models.
 func autoMigrate() error {
-	return DB.AutoMigrate(&model.Migration{}, &model.MigrationLog{})
+	return DB.AutoMigrate(&model.Migration{}, &model.MigrationLog{}, &Meta{})
 }
 
 // resolvedDBPath returns the absolute DB path from config,

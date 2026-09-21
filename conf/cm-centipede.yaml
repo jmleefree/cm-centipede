@@ -31,6 +31,14 @@ centipede:
   db:
     path: ./db/cm-centipede.db
   encryption:
+    # Passphrase the connection credentials are encrypted with. Required: the
+    # server will not start without it. Any passphrase of 12+ characters; it is
+    # stretched into an AES-256 key with scrypt and a salt generated per
+    # database, so it never has to be a particular length or encoding.
+    #
+    # Change this before running anything you care about, and then keep it:
+    # losing or changing the value makes every stored credential unrecoverable.
+    # Override with CENTIPEDE_ENCRYPTION_SECRET_KEY.
     secretKey: secret-key-change-me
   logfile:
     path: ./log/cm-centipede.log

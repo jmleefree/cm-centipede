@@ -159,10 +159,12 @@ type PlanSummary struct {
 // MigrationSummary is the list projection of Migration: every field of the
 // record except Plan, which is replaced by PlanSummary.
 //
-// The list endpoints return this rather than Migration for three reasons: the
-// plan holds plaintext SSH keys and passwords once decrypted, decrypting it per
-// row is the dominant cost of a list call, and one undecryptable row used to
-// fail the whole listing.
+// The list endpoints return this rather than Migration because a list has no
+// use for the connection details: a caller scanning migrations wants to know
+// what each one moves, and the single-record read is where the plan itself
+// belongs. Leaving the plan out also keeps a list call from touching
+// credentials at all — the single-record read masks them (see connsec.MaskPlan),
+// and what is never loaded needs no masking.
 type MigrationSummary struct {
 	ID          string      `json:"id"`
 	Name        string      `json:"name"`
