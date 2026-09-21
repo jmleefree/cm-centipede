@@ -194,9 +194,11 @@ Each container exposes only **one role plus SSH**, so none of the 12 containers 
 | mongodb-source | `localhost:32260` | DB `localhost:37017` (shop_db, hr_db) |
 | mongodb-target | `localhost:32261` | DB `localhost:37018` (empty shop_empty_db, hr_empty_db) |
 
-> Source and target database names differ on purpose. For MongoDB in particular, the URI
-> `mongodb://.../<db>` treats the path database as the authSource, so `dstConnection.db_name`
-> must name `shop_empty_db` / `hr_empty_db` explicitly.
+> Source and target database names differ on purpose. The target name is set by the plan —
+> `dbmsFilter.databases[].targetMapping.dstName` — and not by the connection: `dstConnection`
+> carries server-level access and no database name. For MongoDB it becomes the `<db>` of
+> `mongodb://.../<db>`, whose `authSource` defaults to `admin`; set `db.authSource` to point
+> authentication at the target database instead.
 
 ---
 

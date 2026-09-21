@@ -43,9 +43,11 @@ db.createUser({
     ]
 });
 
-// The connection URI cm-centipede builds (mongodb://.../<db>) sets no authSource, so
-// the DB in the path becomes the auth DB. Create the same centipede account inside
-// shop_db and hr_db as well so connections through those paths authenticate.
+// The connection URI cm-centipede builds is mongodb://.../<db>?authSource=..., and
+// authSource defaults to "admin" — so it is the centipede account above, in admin,
+// that authenticates whichever database the path names. The same account is created
+// inside shop_db and hr_db as well, to cover a connection that points db.authSource
+// at the path database instead.
 db.getSiblingDB("shop_db").createUser({
     user: "centipede",
     pwd: "centipede_pass",

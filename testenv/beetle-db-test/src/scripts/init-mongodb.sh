@@ -14,11 +14,12 @@ mongosh --quiet admin --eval \
 	"db.createUser({ user: 'root', pwd: '$DB_ROOT_PASS', roles: [ { role: 'root', db: 'admin' } ] })" >/dev/null
 log "root account created"
 
-# Two accounts for one user, on purpose. transx-ex builds mongodb://.../<db>
-# without an authSource, so the database in the path becomes the authentication
-# database - which means the account has to exist inside the source database as
-# well, not only in admin. The role still points at admin so the account can
-# list databases, which is what honeybee's collection step does first.
+# Two accounts for one user, on purpose. transx-ex builds
+# mongodb://.../<db>?authSource=..., and authSource defaults to "admin" - so the
+# admin account is the one that authenticates. The second, inside the source
+# database, covers a connection that names that database as its authSource
+# instead. Both roles point at admin so the account can list databases, which is
+# what honeybee's collection step does first.
 cat > /tmp/matrix-users.js <<JS
 db.createUser({ user: "$SRC_DB_USER", pwd: "$SRC_DB_PASS", roles: [ { role: "root", db: "admin" } ] });
 db.getSiblingDB("$SRC_DB").createUser({

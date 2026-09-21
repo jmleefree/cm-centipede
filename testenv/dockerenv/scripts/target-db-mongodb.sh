@@ -35,10 +35,15 @@ db.createUser({
     roles: [ { role: "root", db: "admin" } ]
 });
 
-// When dstConnection sets db_name the URI becomes mongodb://.../<db>, and that DB is
-// treated as the authSource. Create the centipede account inside each target DB up front,
-// before any data exists. Target DB names differ from the source ones, so
-// dstConnection.db_name must name shop_empty_db / hr_empty_db explicitly.
+// The target database is named by the plan, not by the connection: it comes from
+// dbmsFilter.databases[].targetMapping.dstName and becomes the <db> in the URI
+// mongodb://.../<db>, while dstConnection carries server-level access and no
+// database name at all. Authentication goes to authSource, which defaults to
+// "admin" — so the root-role account above is what actually logs in.
+//
+// The per-database accounts below cover the case where db.authSource names the
+// target database instead. They are created up front, before any data exists,
+// because a MongoDB database cannot be granted on after the fact without one.
 db.getSiblingDB("shop_empty_db").createUser({
     user: "centipede",
     pwd: "centipede_pass",
