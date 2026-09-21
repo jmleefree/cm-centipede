@@ -7,7 +7,8 @@
 #   2. docker compose up -d --build --wait  -> wait until all 12 are healthy (init done)
 #   3. Inject the SSH public key into every container (root, centipede)
 #      + source containers also get the private key (relay: source -> target)
-#   4. Print the connection info for every container
+#   4. Collect the source MinIO bucket info (live object counts)
+#   5. Print the connection info for every container
 #
 # Usage:
 #   ./dockerenv-up.sh [--no-cache] [--no-build]
@@ -66,6 +67,16 @@ CONTAINERS=(
     "centipede-testenv-mongodb-target     target 32261"
 )
 
+# Source MinIO buckets (bucket  top-level contents), created by scripts/02-setup-minio.sh
+SOURCE_BUCKETS=(
+    "raw-data       sensors/, sales/, events_stream.json"
+    "processed-data reports/, aggregated/"
+    "images         products/, banners/"
+    "documents      contracts/, invoices/"
+    "backups        daily/, full_backup"
+    "logs           app/, error/"
+)
+
 # ── 1. Generate the SSH keypair ───────────────────────────────────────────────
 mkdir -p "$SSH_KEY_DIR"
 if [ ! -f "$PRIV_KEY" ]; then
@@ -117,7 +128,27 @@ for row in "${CONTAINERS[@]}"; do
 done
 echo ">>> SSH keys injected (pubkey → all, privkey → sources)."
 
-# ── 4. Print connection info ──────────────────────────────────────────────────
+# ── 4. Collect source MinIO bucket info ───────────────────────────────────────
+# Counted live rather than hard-coded so a partially failed upload in
+# 02-setup-minio.sh is visible right after start-up. The "local" mc alias was
+# registered as root inside the container during init, so it is reused here; if
+# the lookup fails the count falls back to "?" instead of aborting the script.
+echo ">>> Reading source MinIO buckets..."
+BUCKET_LINES=""
+BUCKET_LABEL="    source buckets   "
+for row in "${SOURCE_BUCKETS[@]}"; do
+    read -r bucket contents <<< "$row"
+
+    count=$(docker exec centipede-testenv-minio-source \
+                mc ls --recursive "local/${bucket}" 2>/dev/null | wc -l | tr -d ' ') || count=""
+    [ -z "$count" ] && count="?"
+
+    BUCKET_LINES+="$(printf '%s%-15s: %3s objects  (%s)' "$BUCKET_LABEL" "$bucket" "$count" "$contents")"$'\n'
+    BUCKET_LABEL="                     "
+done
+BUCKET_LINES="${BUCKET_LINES%$'\n'}"
+
+# ── 5. Print connection info ──────────────────────────────────────────────────
 cat <<EOF
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -139,6 +170,9 @@ cat <<EOF
   ┌─ Object Storage (MinIO) ────────────────────────────────────────────────
     minio-source     SSH  localhost:32220   API 9000->39000  console http://localhost:39001
     minio-target     SSH  localhost:32221   API 9000->39010  console http://localhost:39011
+
+${BUCKET_LINES}
+    target buckets   same 6 buckets, all empty
 
   ┌─ MariaDB ───────────────────────────────────────────────────────────────
     mariadb-source   SSH  localhost:32230   DB  localhost:33306   (shop_db, hr_db)
