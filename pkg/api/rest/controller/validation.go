@@ -109,18 +109,30 @@ func runValidation(migrationID string) {
 	var allDetails []model.ValidationDetailItem
 	prop := m.Plan.TargetDataMigrationModel
 
+	// The plan entry is stamped here rather than inside pkg/core/validation: a
+	// validator is handed one entry and never sees the plan it sits in, the same
+	// reason the executor stamps its logs on the way out. Without it a plan of
+	// several entries reports every one of them under the same ItemPath.
+	stamp := func(id string, details []model.ValidationDetailItem) []model.ValidationDetailItem {
+		for i := range details {
+			details[i].PlanEntryID = id
+		}
+		return details
+	}
+
 	// ── Filesystem ───────────────────────────────────────────────────────────
 	for _, fs := range prop.FileSystems {
 		details, err := validationpkg.ValidateFileSystem(fs)
 		if err != nil {
 			allDetails = append(allDetails, model.ValidationDetailItem{
-				ItemPath: "filesystem",
-				Status:   "failed",
-				Message:  fmt.Sprintf("validation error: %v", err),
+				PlanEntryID: fs.PlanEntryID,
+				ItemPath:    "filesystem",
+				Status:      "failed",
+				Message:     fmt.Sprintf("validation error: %v", err),
 			})
 			continue
 		}
-		allDetails = append(allDetails, details...)
+		allDetails = append(allDetails, stamp(fs.PlanEntryID, details)...)
 	}
 
 	// ── Object Storage ───────────────────────────────────────────────────────
@@ -128,13 +140,14 @@ func runValidation(migrationID string) {
 		details, err := validationpkg.ValidateObjectStorage(oss)
 		if err != nil {
 			allDetails = append(allDetails, model.ValidationDetailItem{
-				ItemPath: "objectstorage",
-				Status:   "failed",
-				Message:  fmt.Sprintf("validation error: %v", err),
+				PlanEntryID: oss.PlanEntryID,
+				ItemPath:    "objectstorage",
+				Status:      "failed",
+				Message:     fmt.Sprintf("validation error: %v", err),
 			})
 			continue
 		}
-		allDetails = append(allDetails, details...)
+		allDetails = append(allDetails, stamp(oss.PlanEntryID, details)...)
 	}
 
 	// ── DBMS ─────────────────────────────────────────────────────────────────
@@ -142,13 +155,14 @@ func runValidation(migrationID string) {
 		details, err := validationpkg.ValidateDBMS(db)
 		if err != nil {
 			allDetails = append(allDetails, model.ValidationDetailItem{
-				ItemPath: fmt.Sprintf("%s/%s", string(db.DBType), "database"),
-				Status:   "failed",
-				Message:  fmt.Sprintf("validation error: %v", err),
+				PlanEntryID: db.PlanEntryID,
+				ItemPath:    fmt.Sprintf("%s/%s", string(db.DBType), "database"),
+				Status:      "failed",
+				Message:     fmt.Sprintf("validation error: %v", err),
 			})
 			continue
 		}
-		allDetails = append(allDetails, details...)
+		allDetails = append(allDetails, stamp(db.PlanEntryID, details)...)
 	}
 
 	// ── Determine overall status ─────────────────────────────────────────────

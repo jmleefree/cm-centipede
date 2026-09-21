@@ -27,6 +27,10 @@ type DBMigrationInfo struct {
 // migrate under it. Connection refs carry no database name, so the names travel
 // here.
 type MigrationDBModel struct {
+	// PlanEntryID names this entry within the plan
+	// — see MigrationFileSystemModel.PlanEntryID.
+	PlanEntryID string `json:"planEntryId,omitempty"`
+
 	SrcConnection commonmodel.ConnectionRef `json:"srcConnection" validate:"required"`
 	DstConnection commonmodel.ConnectionRef `json:"dstConnection" validate:"required"`
 	DBType        commonmodel.DBMSType      `json:"dbType"        validate:"required,oneof=mysql mariadb postgresql mongodb"`

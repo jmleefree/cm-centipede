@@ -1584,6 +1584,10 @@
                         "type": "string"
                     }
                 },
+                "planEntryId": {
+                    "description": "PlanEntryID names this entry within the plan\n— see MigrationFileSystemModel.PlanEntryID.",
+                    "type": "string"
+                },
                 "srcConnection": {
                     "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ConnectionRef"
                 }
@@ -1618,6 +1622,10 @@
                     "items": {
                         "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_target-model.FSMigrationInfo"
                     }
+                },
+                "planEntryId": {
+                    "description": "PlanEntryID names this entry within the plan. It is what a migration log,\na validation detail and a per-entry retry refer to, so that none of them\nhas to identify an entry by its position in the array — a position is not\na name, and nothing outside the plan can hold on to one.\n\n\"entry\", not \"item\": an item is the folder, bucket or database inside one\nof these (see countPlanItems, MigrationLog.ItemPath, Migration.TotalItems),\nand a name that meant both layers at once would be worse than the index it\nreplaces. Not \"id\" either — an entry is anonymous in its own document,\nsitting in fileSystems[] with no type name beside it, so \"id\" alone would\nnot say what kind of id it is. The log field that refers to it is spelled\nthe same, which is the point: one token to search for in both documents.\n\nAssigned by POST /plans/target. A plan that arrives without one — edited,\nhand-written, issued elsewhere — is given ids by CreateMigration before it\nis stored, so a stored plan always has them.",
+                    "type": "string"
                 },
                 "srcConnection": {
                     "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ConnectionRef"
@@ -1662,6 +1670,10 @@
                     "items": {
                         "type": "string"
                     }
+                },
+                "planEntryId": {
+                    "description": "PlanEntryID names this entry within the plan\n— see MigrationFileSystemModel.PlanEntryID.",
+                    "type": "string"
                 },
                 "srcConnection": {
                     "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ConnectionRef"
@@ -2063,6 +2075,10 @@
                 "migrationId": {
                     "type": "string"
                 },
+                "planEntryId": {
+                    "description": "PlanEntryID names the plan entry this item came from\n(targetmodel.Migration*Model.PlanEntryID). ItemPath alone does not identify\nit: two entries of one plan legitimately carry the same path — one source\nfanned out to two destinations, or two sources that scanned the same\ndirectory — and their log lines were indistinguishable.\n\nIt is the only thing about the entry kept here. Which host the item was\nread from, where it was written and under what rules are all in the plan,\nwhich GET /centipede/migration/{id} returns beside these logs; copying any\nof it into every row would not save the reader that lookup.\n\nNot indexed: nothing queries by it. One migration's logs are read whole, by\nthe list endpoint and by the retry that groups them in memory, so an index\nhere would only be paid for on every insert.\n\nEmpty on rows written before this field existed.",
+                    "type": "string"
+                },
                 "rollbackErrorMsg": {
                     "type": "string"
                 },
@@ -2147,6 +2163,39 @@
                 }
             }
         },
+        "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.PlanEntry": {
+            "type": "object",
+            "required": [
+                "dstConnection",
+                "srcConnection"
+            ],
+            "properties": {
+                "dbmsFilter": {
+                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.DBMSFilter"
+                },
+                "dstConnection": {
+                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ConnectionRef"
+                },
+                "fileSystemFilter": {
+                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.FileSystemFilter"
+                },
+                "fileSystemStrategy": {
+                    "description": "FileSystemStrategy is the transfer strategy applied to filesystem (SSH→SSH)\ntasks. Empty is normalised to \"relay\" (safer default: avoids agent-forward\nsetup requirements). It has no effect on object-storage or DBMS tasks, where\nrelay is always used / not applicable.",
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "direct",
+                        "relay"
+                    ]
+                },
+                "objectStorageFilter": {
+                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ObjectStorageFilter"
+                },
+                "srcConnection": {
+                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ConnectionRef"
+                }
+            }
+        },
         "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.PlanSummary": {
             "type": "object",
             "properties": {
@@ -2191,30 +2240,16 @@
         "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.TargetPlanReq": {
             "type": "object",
             "required": [
-                "dstConnection",
+                "plans",
                 "source"
             ],
             "properties": {
-                "dbmsFilter": {
-                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.DBMSFilter"
-                },
-                "dstConnection": {
-                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ConnectionRef"
-                },
-                "fileSystemFilter": {
-                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.FileSystemFilter"
-                },
-                "fileSystemStrategy": {
-                    "description": "FileSystemStrategy is the transfer strategy applied to filesystem (SSH→SSH)\ntasks. Empty is normalised to \"relay\" (safer default: avoids agent-forward\nsetup requirements). It has no effect on object-storage or DBMS tasks, where\nrelay is always used / not applicable.",
-                    "type": "string",
-                    "enum": [
-                        "auto",
-                        "direct",
-                        "relay"
-                    ]
-                },
-                "objectStorageFilter": {
-                    "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ObjectStorageFilter"
+                "plans": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.PlanEntry"
+                    }
                 },
                 "source": {
                     "$ref": "#/definitions/github_com_cloud-barista_cm-centipede_dmdl_source-model.SourceDataMigrationModel"
@@ -2229,6 +2264,10 @@
                     "type": "string"
                 },
                 "message": {
+                    "type": "string"
+                },
+                "planEntryId": {
+                    "description": "PlanEntryID names the plan entry this detail is about, the same id\nMigrationLog carries. Without it a plan of several entries reports every\none of them under the same ItemPath — \"filesystem\" for a whole entry that\ncould not be resolved — and nothing says which.",
                     "type": "string"
                 },
                 "status": {

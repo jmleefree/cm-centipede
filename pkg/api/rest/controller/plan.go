@@ -100,6 +100,33 @@ func validateConnectionRef(ref commonmodel.ConnectionRef) string {
 	return ""
 }
 
+// validateSourceConnectionRef restricts a source-side ConnectionRef to honeybee.
+// Returns an empty string when valid.
+//
+// Every other source is a destination type: the source model is produced by
+// cm-honeybee, so a ref naming anything else was not produced by a discovery and
+// names nothing the plan can resolve. Rejecting it here reports that directly,
+// rather than as a failure to match a connection id that was never there.
+//
+// A sub-field belonging to another source is rejected rather than ignored. It
+// carries credentials the caller believes are in use, and silently dropping them
+// leaves those credentials in a request body that went nowhere.
+func validateSourceConnectionRef(ref commonmodel.ConnectionRef) string {
+	if ref.Source != commonmodel.ConnectionSourceHoneybee {
+		return fmt.Sprintf(
+			"source connection must be honeybee (got %q); the source model is produced by cm-honeybee",
+			ref.Source)
+	}
+	if ref.Honeybee == nil || ref.Honeybee.ConnectionID == "" {
+		return "honeybee.connectionId is required"
+	}
+	if ref.BeetleSSH != nil || ref.BeetleOS != nil || ref.BeetleDB != nil ||
+		ref.SSH != nil || ref.Minio != nil || ref.DB != nil {
+		return "source connection carries a sub-field belonging to another source"
+	}
+	return ""
+}
+
 // GetTargetPlan godoc
 //
 //	@Summary		Analyse target migration plan
@@ -118,26 +145,41 @@ func GetTargetPlan(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse("invalid request body: "+err.Error()))
 	}
 
-	// Validate destination ConnectionRef
-	if msg := validateConnectionRef(req.DstConnection); msg != "" {
-		return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse("dstConnection: "+msg))
+	// The `min=1` tag does not run — no validator is registered on the echo
+	// instance — and an empty plans array would otherwise answer 200 with a plan
+	// that migrates nothing.
+	if len(req.Plans) == 0 {
+		return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse(
+			"plans is required: name a destination for each entry of the source model"))
 	}
 
-	// Validate each source connection
+	// Structural validation of every ConnectionRef in the request. Which entry a
+	// srcConnection resolves to, and whether one is left unpaired, is the
+	// builder's to answer — it is the side holding the source index.
 	src := req.Source.SourceDataMigrationModel
 	for _, fs := range src.FileSystems {
-		if msg := validateConnectionRef(fs.Connection); msg != "" {
+		if msg := validateSourceConnectionRef(fs.Connection); msg != "" {
 			return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse("fileSystem source connection: "+msg))
 		}
 	}
 	for _, os := range src.ObjectStorages {
-		if msg := validateConnectionRef(os.Connection); msg != "" {
+		if msg := validateSourceConnectionRef(os.Connection); msg != "" {
 			return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse("objectStorage source connection: "+msg))
 		}
 	}
 	for _, db := range src.Databases {
-		if msg := validateConnectionRef(db.Connection); msg != "" {
+		if msg := validateSourceConnectionRef(db.Connection); msg != "" {
 			return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse("db source connection: "+msg))
+		}
+	}
+	for i, entry := range req.Plans {
+		if msg := validateSourceConnectionRef(entry.SrcConnection); msg != "" {
+			return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse(
+				fmt.Sprintf("plans[%d].srcConnection: %s", i, msg)))
+		}
+		if msg := validateConnectionRef(entry.DstConnection); msg != "" {
+			return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse(
+				fmt.Sprintf("plans[%d].dstConnection: %s", i, msg)))
 		}
 	}
 

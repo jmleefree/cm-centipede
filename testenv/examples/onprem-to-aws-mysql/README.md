@@ -311,29 +311,42 @@ curl -s -X POST -u default:default http://localhost:8085/centipede/plans/target 
   -H 'Content-Type: application/json' \
   -d '{
         "source": <the /db/refined response, unchanged>,
-        "dstConnection": {
-          "source": "beetleDb",
-          "beetleDb": {
-            "nsId": "cpbt01",
-            "rdbmsId": "cpbt-aws-db-mysql",
-            "password": "<the instance master password>",
-            "tlsMode": "prefer"
-          }
-        },
-        "dbmsFilter": {
-          "databases": [
-            {
-              "targetMapping": { "srcName": "shop_db", "dstName": "shop_db" },
-              "rules": [
-                { "type": "object_exclude", "kind": "view", "name": "v_low_stock_alert" }
-              ]
+        "plans": [{
+          "srcConnection": {
+            "source": "honeybee",
+            "honeybee": { "connectionId": "<the connection id from step 2>" }
+          },
+          "dstConnection": {
+            "source": "beetleDb",
+            "beetleDb": {
+              "nsId": "cpbt01",
+              "rdbmsId": "cpbt-aws-db-mysql",
+              "password": "<the instance master password>",
+              "tlsMode": "prefer"
             }
-          ]
-        }
+          },
+          "dbmsFilter": {
+            "databases": [
+              {
+                "targetMapping": { "srcName": "shop_db", "dstName": "shop_db" },
+                "rules": [
+                  { "type": "object_exclude", "kind": "view", "name": "v_low_stock_alert" }
+                ]
+              }
+            ]
+          }
+        }]
       }'
 ```
 
 Take **`.data`** — the plan — and pass it to the next call unchanged.
+
+**`plans` is an array: one entry per (source entry, destination).** This example
+has one connection going to one instance, so it holds a single entry. A source
+group with several connections would send several — that is what `srcConnection`
+is for, saying which entry of `source` this destination is meant for. Every entry
+of `source` has to be named by exactly one of them, and two entries may not write
+to the same place.
 
 **`dstConnection` is a reference plus one secret.** `beetleDb` names an instance
 that already exists, and cm-centipede reads its host, port and admin account from

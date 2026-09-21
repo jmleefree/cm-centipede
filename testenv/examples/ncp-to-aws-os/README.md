@@ -270,25 +270,38 @@ curl -s -X POST -u default:default http://localhost:8085/centipede/plans/target 
   -H 'Content-Type: application/json' \
   -d '{
         "source": <the /objectstorage/refined response, unchanged>,
-        "dstConnection": {
-          "source": "beetleObjectStorage",
-          "beetleObjectStorage": {
-            "nsId": "cpbt01",
-            "osId": "cpbt-aws-bucket"
-          }
-        },
-        "objectStorageFilter": {
-          "targetMapping": {
-            "srcName": "cptf-ncp-bucket-test/"
+        "plans": [{
+          "srcConnection": {
+            "source": "honeybee",
+            "honeybee": { "connectionId": "<the connection id from step 2>" }
           },
-          "rules": [
-            { "action": "exclude", "type": "glob", "pattern": "**/*.zip" }
-          ]
-        }
+          "dstConnection": {
+            "source": "beetleObjectStorage",
+            "beetleObjectStorage": {
+              "nsId": "cpbt01",
+              "osId": "cpbt-aws-bucket"
+            }
+          },
+          "objectStorageFilter": {
+            "targetMapping": {
+              "srcName": "cptf-ncp-bucket-test/"
+            },
+            "rules": [
+              { "action": "exclude", "type": "glob", "pattern": "**/*.zip" }
+            ]
+          }
+        }]
       }'
 ```
 
 Take **`.data`** — the plan — and pass it to the next call unchanged.
+
+**`plans` is an array: one entry per (source entry, destination).** This example
+has one connection going to one bucket, so it holds a single entry. A source
+group with several connections would send several — that is what `srcConnection`
+is for, saying which entry of `source` this destination is meant for. Every entry
+of `source` has to be named by exactly one of them, and two entries may not write
+to the same place.
 
 **The two ends are named in opposite styles, side by side.** The source arrives
 inside `source` as honeybee collected it, carrying a `honeybee` reference that

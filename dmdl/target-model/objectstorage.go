@@ -15,6 +15,10 @@ type ObjectMigrationInfo struct {
 // default, or objectstorage→filesystem cross-storage when DstType is filesystem.
 // The source is always object storage; DstType names the destination storage.
 type MigrationObjectStorageModel struct {
+	// PlanEntryID names this entry within the plan
+	// — see MigrationFileSystemModel.PlanEntryID.
+	PlanEntryID string `json:"planEntryId,omitempty"`
+
 	SrcConnection commonmodel.ConnectionRef `json:"srcConnection" validate:"required"`
 	DstConnection commonmodel.ConnectionRef `json:"dstConnection" validate:"required"`
 	// DstType is the destination storage type: empty/"objectstorage" = S3→S3,

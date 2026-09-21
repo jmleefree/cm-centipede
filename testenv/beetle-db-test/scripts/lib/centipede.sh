@@ -156,8 +156,19 @@ cp_plan() {
 		    + (if $sch == "" then {}
 		       else {pgSchemas:[{srcName:"public", dstName:$sch}]} end))}]}')"
 
+	# plans is an array: one entry per (source entry, destination). This cell
+	# migrates one connection to one target, so it holds a single entry, and
+	# srcConnection is lifted straight out of the source model - it is the
+	# connection honeybee produced that entry with, so nothing has to be threaded
+	# in alongside it.
 	body="$(jq -cn --argjson s "$src_model" --argjson d "$(cp_dst_connection "$engine")" \
-		--argjson f "$filter" '{source:$s, dstConnection:$d, dbmsFilter:$f}')"
+		--argjson f "$filter" \
+		'{source:$s,
+		  plans:[{
+		    srcConnection: $s.sourceDataMigrationModel.databases[0].connection,
+		    dstConnection: $d,
+		    dbmsFilter: $f
+		  }]}')"
 
 	tmp="$(mktemp)"
 	code="$(cp_curl POST "/plans/target" "$body" "$tmp")"

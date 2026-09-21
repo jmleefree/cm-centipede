@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	commonmodel "github.com/cloud-barista/cm-centipede/dmdl/common-model"
+	sourcemodel "github.com/cloud-barista/cm-centipede/dmdl/source-model"
 	targetmodel "github.com/cloud-barista/cm-centipede/dmdl/target-model"
 	"github.com/cloud-barista/cm-centipede/pkg/api/rest/model"
 	"github.com/cloud-barista/cm-centipede/pkg/client/beetle"
@@ -440,204 +442,383 @@ func validatePgSchemas(dbType, database string, pairs []commonmodel.PgSchemaMapp
 	return nil
 }
 
-// BuildTargetDataMigrationModel validates the plan request and builds the
-// TargetDataMigrationModel from the source discovery results and filter options.
-//
-// Validation errors (→ 400 in the controller):
-//   - unsupported source/target type combination (DBMS is same-type only;
-//     filesystem↔objectstorage cross-storage is allowed)
-//   - DBMS engine mismatch, or a target older than the source
-//   - a target database that neither exists nor can be created
-//   - filesystem→objectstorage with an rsync-incompatible size filter
-//
-// External-system errors (→ 500 in the controller) are wrapped and returned as-is.
-func BuildTargetDataMigrationModel(req model.TargetPlanReq) (targetmodel.TargetDataMigrationModel, error) {
-	src := req.Source.SourceDataMigrationModel
+// sourceEntry is one entry of the request's source model, found by the honeybee
+// connection id that produced it. Exactly one of the three pointers is non-nil,
+// and kind says which.
+type sourceEntry struct {
+	kind dataKind
+	fs   *sourcemodel.SourceFileSystemModel
+	os   *sourcemodel.SourceObjectStorageModel
+	db   *sourcemodel.SourceDBModel
+}
 
-	dstType, err := dstKind(req.DstConnection)
-	if err != nil {
-		return targetmodel.TargetDataMigrationModel{}, fmt.Errorf("resolve destination connection type: %w", err)
+// indexSource maps every entry of the source model by its connection id, which
+// is how a plan entry names one.
+//
+// A honeybee connection has exactly one ConnType, so an id belongs to exactly
+// one of the three domains and the index settles which without asking honeybee.
+// An id in two of them is a source model no discovery produced, and it is
+// reported rather than resolved: either answer would be a guess, and the guess
+// decides which filter fields are legal.
+func indexSource(src sourcemodel.SourceDataMigrationProperty) (map[string]sourceEntry, error) {
+	index := make(map[string]sourceEntry,
+		len(src.FileSystems)+len(src.ObjectStorages)+len(src.Databases))
+
+	add := func(key string, e sourceEntry) error {
+		if prev, ok := index[key]; ok {
+			return validationErr(
+				"source connection %q appears in more than one domain of the source model (%s and %s)",
+				key, prev.kind, e.kind)
+		}
+		index[key] = e
+		return nil
 	}
 
-	var result targetmodel.TargetDataMigrationProperty
+	for i := range src.FileSystems {
+		e := &src.FileSystems[i]
+		if err := add(SrcConnKey(e.Connection), sourceEntry{kind: kindSSH, fs: e}); err != nil {
+			return nil, err
+		}
+	}
+	for i := range src.ObjectStorages {
+		e := &src.ObjectStorages[i]
+		if err := add(SrcConnKey(e.Connection), sourceEntry{kind: kindObjectStorage, os: e}); err != nil {
+			return nil, err
+		}
+	}
+	for i := range src.Databases {
+		e := &src.Databases[i]
+		if err := add(SrcConnKey(e.Connection), sourceEntry{kind: kindDBMS, db: e}); err != nil {
+			return nil, err
+		}
+	}
+	return index, nil
+}
 
-	// ── Filesystem ──────────────────────────────────────────────────────────
+// validateEntryDomain checks that a plan entry sets only what its source domain
+// gives meaning to.
+//
+// An ignored filter is worse than a rejected one: the caller reads back a plan
+// that migrated everything and believes their filter ran. The same goes for a
+// strategy, which only a filesystem transfer has anywhere to apply.
+func validateEntryDomain(kind dataKind, e model.PlanEntry) string {
+	given := []struct {
+		name string
+		set  bool
+	}{
+		{"fileSystemFilter", e.FileSystemFilter != nil},
+		{"objectStorageFilter", e.ObjectStorageFilter != nil},
+		{"dbmsFilter", e.DBMSFilter != nil},
+		{"fileSystemStrategy", e.FileSystemStrategy != ""},
+	}
+
+	var allowed map[string]bool
+	switch kind {
+	case kindSSH:
+		allowed = map[string]bool{"fileSystemFilter": true, "fileSystemStrategy": true}
+	case kindObjectStorage:
+		allowed = map[string]bool{"objectStorageFilter": true}
+	case kindDBMS:
+		allowed = map[string]bool{"dbmsFilter": true}
+	}
+
+	for _, f := range given {
+		if f.set && !allowed[f.name] {
+			return fmt.Sprintf("%s is not valid for a %s source", f.name, kind)
+		}
+	}
+	return ""
+}
+
+// buildFileSystemEntry turns one plan entry naming a filesystem source into its
+// target model.
+func buildFileSystemEntry(
+	e model.PlanEntry,
+	srcFS sourcemodel.SourceFileSystemModel,
+	dstType dataKind,
+) (targetmodel.MigrationFileSystemModel, error) {
+
 	// Normalise the filesystem transfer strategy; empty defaults to relay.
-	fsStrategy := req.FileSystemStrategy
-	if fsStrategy == "" {
-		fsStrategy = commonmodel.StrategyRelay
+	strategy := e.FileSystemStrategy
+	if strategy == "" {
+		strategy = commonmodel.StrategyRelay
 	}
-	var fsRules []commonmodel.PathFilterRule
-	var fsMapping *commonmodel.TargetMapping
-	if f := req.FileSystemFilter; f != nil {
-		fsRules = f.Rules
-		fsMapping = &f.TargetMapping
-		if err := validateStorageMapping("fileSystemFilter", fsMapping); err != nil {
-			return targetmodel.TargetDataMigrationModel{}, err
+
+	var rules []commonmodel.PathFilterRule
+	var mapping *commonmodel.TargetMapping
+	if f := e.FileSystemFilter; f != nil {
+		rules = f.Rules
+		mapping = &f.TargetMapping
+		if err := validateStorageMapping("fileSystemFilter", mapping); err != nil {
+			return targetmodel.MigrationFileSystemModel{}, err
 		}
 		// Every filesystem source transfers with rsync, whichever destination it
 		// lands on, so this one is checked before the destination is even known.
-		if err := validateSizeGateOrdering(fsRules); err != nil {
-			return targetmodel.TargetDataMigrationModel{}, err
+		if err := validateSizeGateOrdering(rules); err != nil {
+			return targetmodel.MigrationFileSystemModel{}, err
 		}
 	}
-	fsMatched := false
-	for _, srcFS := range src.FileSystems {
-		// Destination must be filesystem (SSH→SSH) or object storage (filesystem→S3
-		// cross-storage). DBMS destinations are invalid for filesystem sources.
-		var fsDstType string
-		switch dstType {
-		case kindSSH:
-			fsDstType = commonmodel.StorageTypeFilesystem
-		case kindObjectStorage:
-			fsDstType = commonmodel.StorageTypeObjectStorage
-			// filesystem→objectstorage applies the source filter on the rsync
-			// (ssh→local) relay step, which cannot express every size rule.
-			if err := validateRsyncCompatibleRules(fsRules); err != nil {
-				return targetmodel.TargetDataMigrationModel{}, err
-			}
-		default:
-			return targetmodel.TargetDataMigrationModel{}, validationErr(
-				"source contains filesystem data but destination type is %q; filesystem source requires SSH or object storage destination", dstType)
-		}
 
-		folderPaths := make([]string, 0, len(srcFS.Folders))
-		for _, entry := range srcFS.Folders {
-			folderPaths = append(folderPaths, entry.Path)
+	// Destination must be filesystem (SSH→SSH) or object storage (filesystem→S3
+	// cross-storage). DBMS destinations are invalid for filesystem sources.
+	var fsDstType string
+	switch dstType {
+	case kindSSH:
+		fsDstType = commonmodel.StorageTypeFilesystem
+	case kindObjectStorage:
+		fsDstType = commonmodel.StorageTypeObjectStorage
+		// filesystem→objectstorage applies the source filter on the rsync
+		// (ssh→local) relay step, which cannot express every size rule.
+		if err := validateRsyncCompatibleRules(rules); err != nil {
+			return targetmodel.MigrationFileSystemModel{}, err
 		}
-		srcPath, dstPath, ok := selectMigrationPath(srcFS.Path, folderPaths, fsMapping)
-		if !ok {
-			continue
-		}
-		// filesystem→objectstorage lands in a bucket too, so an unmapped DstPath
-		// would otherwise carry the source *directory* ("/testdata") into the
-		// bucket-name position. Same treatment, same reasons.
-		dstPath = resolveObjectStorageDstPath(req.DstConnection, fsMapping, dstPath)
-		fsMatched = true
-
-		result.FileSystems = append(result.FileSystems, targetmodel.MigrationFileSystemModel{
-			SrcConnection: srcFS.Connection,
-			DstConnection: req.DstConnection,
-			DstType:       fsDstType,
-			Strategy:      fsStrategy,
-			Folders: []targetmodel.FSMigrationInfo{{
-				Order:   1,
-				SrcPath: srcPath,
-				DstPath: dstPath,
-				Rules:   fsRules,
-			}},
-		})
-	}
-	if fsMapping != nil && len(src.FileSystems) > 0 && !fsMatched {
-		return targetmodel.TargetDataMigrationModel{}, validationErr(
-			"targetMapping.srcName %q matches no folder in the source filesystem model", fsMapping.SrcName)
+	default:
+		return targetmodel.MigrationFileSystemModel{}, validationErr(
+			"a filesystem source requires an SSH or object storage destination, but dstConnection is %q", dstType)
 	}
 
-	// ── ObjectStorage ────────────────────────────────────────────────────────
-	var osRules []commonmodel.PathFilterRule
-	var osMapping *commonmodel.TargetMapping
-	if f := req.ObjectStorageFilter; f != nil {
-		osRules = f.Rules
-		osMapping = &f.TargetMapping
-		if err := validateStorageMapping("objectStorageFilter", osMapping); err != nil {
-			return targetmodel.TargetDataMigrationModel{}, err
-		}
+	folderPaths := make([]string, 0, len(srcFS.Folders))
+	for _, folder := range srcFS.Folders {
+		folderPaths = append(folderPaths, folder.Path)
 	}
-	osMatched := false
-	for _, srcOS := range src.ObjectStorages {
-		// Destination must be object storage (S3→S3) or filesystem (objectstorage→
-		// filesystem cross-storage). DBMS destinations are invalid.
-		var osDstType string
-		switch dstType {
-		case kindObjectStorage:
-			osDstType = commonmodel.StorageTypeObjectStorage
-		case kindSSH:
-			// objectstorage→filesystem applies the source filter on the S3 download
-			// step (generic matcher), so all glob/size rules are supported.
-			osDstType = commonmodel.StorageTypeFilesystem
-		default:
-			return targetmodel.TargetDataMigrationModel{}, validationErr(
-				"source contains object storage data but destination type is %q; object storage source requires object storage or SSH destination", dstType)
-		}
-
-		bucketKeys := make([]string, 0, len(srcOS.Folders))
-		for _, entry := range srcOS.Folders {
-			bucketKeys = append(bucketKeys, entry.Key)
-		}
-		srcPath, dstPath, ok := selectMigrationPath(srcOS.Path, bucketKeys, osMapping)
-		if !ok {
-			continue
-		}
-		dstPath = resolveObjectStorageDstPath(req.DstConnection, osMapping, dstPath)
-		osMatched = true
-
-		result.ObjectStorages = append(result.ObjectStorages, targetmodel.MigrationObjectStorageModel{
-			SrcConnection: srcOS.Connection,
-			DstConnection: req.DstConnection,
-			DstType:       osDstType,
-			Buckets: []targetmodel.ObjectMigrationInfo{{
-				Order:   1,
-				SrcPath: srcPath,
-				DstPath: dstPath,
-				Rules:   osRules,
-			}},
-		})
+	srcPath, dstPath, ok := selectMigrationPath(srcFS.Path, folderPaths, mapping)
+	if !ok {
+		return targetmodel.MigrationFileSystemModel{}, validationErr(
+			"fileSystemFilter.targetMapping.srcName %q matches no folder of this source", mapping.SrcName)
 	}
-	if osMapping != nil && len(src.ObjectStorages) > 0 && !osMatched {
-		return targetmodel.TargetDataMigrationModel{}, validationErr(
-			"targetMapping.srcName %q matches no bucket in the source object storage model", osMapping.SrcName)
-	}
+	// filesystem→objectstorage lands in a bucket too, so an unmapped DstPath
+	// would otherwise carry the source *directory* ("/testdata") into the
+	// bucket-name position. Same treatment, same reasons.
+	dstPath = resolveObjectStorageDstPath(e.DstConnection, mapping, dstPath)
 
-	// ── DBMS ────────────────────────────────────────────────────────────────
-	if len(src.Databases) > 0 && dstType != kindDBMS {
-		return targetmodel.TargetDataMigrationModel{}, validationErr(
-			"source contains DBMS data but destination type is %q; DBMS→DBMS required", dstType)
-	}
-
-	// A source model already pairs one connection with the databases read through
-	// it, which is the shape MigrationDBModel wants, so no regrouping is needed.
-	for _, srcDB := range src.Databases {
-		dbType, err := validateDBMSEngines(srcDB.Connection, req.DstConnection)
-		if err != nil {
-			return targetmodel.TargetDataMigrationModel{}, err
-		}
-
-		available := make([]string, 0, len(srcDB.Databases))
-		for _, info := range srcDB.Databases {
-			available = append(available, info.Database)
-		}
-
-		items, err := buildDBMigrationInfos(available, dbType, req.DBMSFilter)
-		if err != nil {
-			return targetmodel.TargetDataMigrationModel{}, err
-		}
-		if len(items) == 0 {
-			return targetmodel.TargetDataMigrationModel{}, validationErr(
-				"no database selected for migration; dbmsFilter.databases names none of the source databases")
-		}
-
-		for _, it := range items {
-			if err := validateDBMSVersion(srcDB.Connection, req.DstConnection, it.SrcName, dbType); err != nil {
-				return targetmodel.TargetDataMigrationModel{}, err
-			}
-			dstLoc, err := migration.ResolveDBMSLocation(req.DstConnection, it.DstName, dbType)
-			if err != nil {
-				return targetmodel.TargetDataMigrationModel{}, fmt.Errorf("resolve target DB location: %w", err)
-			}
-			if err := validateDBMSTargetReachable(req.DstConnection, dstLoc); err != nil {
-				return targetmodel.TargetDataMigrationModel{}, err
-			}
-		}
-
-		result.Databases = append(result.Databases, targetmodel.MigrationDBModel{
-			SrcConnection: srcDB.Connection,
-			DstConnection: req.DstConnection,
-			DBType:        commonmodel.DBMSType(dbType),
-			Databases:     items,
-		})
-	}
-
-	return targetmodel.TargetDataMigrationModel{
-		TargetDataMigrationModel: result,
+	return targetmodel.MigrationFileSystemModel{
+		PlanEntryID:   newPlanEntryID(),
+		SrcConnection: srcFS.Connection,
+		DstConnection: e.DstConnection,
+		DstType:       fsDstType,
+		Strategy:      strategy,
+		Folders: []targetmodel.FSMigrationInfo{{
+			Order:   1,
+			SrcPath: srcPath,
+			DstPath: dstPath,
+			Rules:   rules,
+		}},
 	}, nil
+}
+
+// buildObjectStorageEntry turns one plan entry naming an object storage source
+// into its target model.
+func buildObjectStorageEntry(
+	e model.PlanEntry,
+	srcOS sourcemodel.SourceObjectStorageModel,
+	dstType dataKind,
+) (targetmodel.MigrationObjectStorageModel, error) {
+
+	var rules []commonmodel.PathFilterRule
+	var mapping *commonmodel.TargetMapping
+	if f := e.ObjectStorageFilter; f != nil {
+		rules = f.Rules
+		mapping = &f.TargetMapping
+		if err := validateStorageMapping("objectStorageFilter", mapping); err != nil {
+			return targetmodel.MigrationObjectStorageModel{}, err
+		}
+	}
+
+	// Destination must be object storage (S3→S3) or filesystem (objectstorage→
+	// filesystem cross-storage). DBMS destinations are invalid.
+	var osDstType string
+	switch dstType {
+	case kindObjectStorage:
+		osDstType = commonmodel.StorageTypeObjectStorage
+	case kindSSH:
+		// objectstorage→filesystem applies the source filter on the S3 download
+		// step (generic matcher), so all glob/size rules are supported.
+		osDstType = commonmodel.StorageTypeFilesystem
+	default:
+		return targetmodel.MigrationObjectStorageModel{}, validationErr(
+			"an object storage source requires an object storage or SSH destination, but dstConnection is %q", dstType)
+	}
+
+	bucketKeys := make([]string, 0, len(srcOS.Folders))
+	for _, folder := range srcOS.Folders {
+		bucketKeys = append(bucketKeys, folder.Key)
+	}
+	srcPath, dstPath, ok := selectMigrationPath(srcOS.Path, bucketKeys, mapping)
+	if !ok {
+		return targetmodel.MigrationObjectStorageModel{}, validationErr(
+			"objectStorageFilter.targetMapping.srcName %q matches no bucket of this source", mapping.SrcName)
+	}
+	dstPath = resolveObjectStorageDstPath(e.DstConnection, mapping, dstPath)
+
+	return targetmodel.MigrationObjectStorageModel{
+		PlanEntryID:   newPlanEntryID(),
+		SrcConnection: srcOS.Connection,
+		DstConnection: e.DstConnection,
+		DstType:       osDstType,
+		Buckets: []targetmodel.ObjectMigrationInfo{{
+			Order:   1,
+			SrcPath: srcPath,
+			DstPath: dstPath,
+			Rules:   rules,
+		}},
+	}, nil
+}
+
+// buildDBEntry turns one plan entry naming a DBMS source into its target model.
+//
+// A source model already pairs one connection with the databases read through
+// it, which is the shape MigrationDBModel wants, so no regrouping is needed.
+func buildDBEntry(
+	e model.PlanEntry,
+	srcDB sourcemodel.SourceDBModel,
+	dstType dataKind,
+) (targetmodel.MigrationDBModel, error) {
+
+	if dstType != kindDBMS {
+		return targetmodel.MigrationDBModel{}, validationErr(
+			"a DBMS source requires a DBMS destination, but dstConnection is %q", dstType)
+	}
+
+	dbType, err := validateDBMSEngines(srcDB.Connection, e.DstConnection)
+	if err != nil {
+		return targetmodel.MigrationDBModel{}, err
+	}
+
+	available := make([]string, 0, len(srcDB.Databases))
+	for _, info := range srcDB.Databases {
+		available = append(available, info.Database)
+	}
+
+	items, err := buildDBMigrationInfos(available, dbType, e.DBMSFilter)
+	if err != nil {
+		return targetmodel.MigrationDBModel{}, err
+	}
+	if len(items) == 0 {
+		return targetmodel.MigrationDBModel{}, validationErr(
+			"no database selected for migration; dbmsFilter.databases names none of this source's databases")
+	}
+
+	for _, it := range items {
+		if err := validateDBMSVersion(srcDB.Connection, e.DstConnection, it.SrcName, dbType); err != nil {
+			return targetmodel.MigrationDBModel{}, err
+		}
+		dstLoc, err := migration.ResolveDBMSLocation(e.DstConnection, it.DstName, dbType)
+		if err != nil {
+			return targetmodel.MigrationDBModel{}, fmt.Errorf("resolve target DB location: %w", err)
+		}
+		if err := validateDBMSTargetReachable(e.DstConnection, dstLoc); err != nil {
+			return targetmodel.MigrationDBModel{}, err
+		}
+	}
+
+	return targetmodel.MigrationDBModel{
+		PlanEntryID:   newPlanEntryID(),
+		SrcConnection: srcDB.Connection,
+		DstConnection: e.DstConnection,
+		DBType:        commonmodel.DBMSType(dbType),
+		Databases:     items,
+	}, nil
+}
+
+// BuildTargetDataMigrationModel validates the plan request and builds the
+// TargetDataMigrationModel from it.
+//
+// One plan entry produces one target model entry. The request pairs each entry
+// of the source model with its own destination and its own filter, so a
+// group-level source model — several connections discovered under one source
+// group — describes several migrations rather than several sources crowding
+// onto one destination.
+//
+// Validation errors (→ 400 in the controller):
+//   - a srcConnection naming no entry of the source model, or a source entry no
+//     plan entry names
+//   - a filter or strategy that the entry's source domain gives no meaning to
+//   - unsupported source/target type combination (DBMS is same-type only;
+//     filesystem↔objectstorage cross-storage is allowed)
+//   - a targetMapping.srcName matching nothing in the source entry it applies to
+//   - DBMS engine mismatch, or a target older than the source
+//   - a target database that neither exists nor can be created
+//   - filesystem→objectstorage with an rsync-incompatible size filter
+//   - two entries writing to the same destination
+//
+// External-system errors (→ 500 in the controller) are wrapped and returned as-is.
+func BuildTargetDataMigrationModel(req model.TargetPlanReq) (targetmodel.TargetDataMigrationModel, error) {
+	index, err := indexSource(req.Source.SourceDataMigrationModel)
+	if err != nil {
+		return targetmodel.TargetDataMigrationModel{}, err
+	}
+
+	var result targetmodel.TargetDataMigrationProperty
+	referenced := make(map[string]bool, len(index))
+
+	for i, entry := range req.Plans {
+		key := SrcConnKey(entry.SrcConnection)
+		src, ok := index[key]
+		if !ok {
+			return targetmodel.TargetDataMigrationModel{}, validationErr(
+				"plans[%d].srcConnection: honeybee connection %q names no entry of the source model", i, key)
+		}
+		referenced[key] = true
+
+		if msg := validateEntryDomain(src.kind, entry); msg != "" {
+			return targetmodel.TargetDataMigrationModel{}, validationErr("plans[%d]: %s", i, msg)
+		}
+
+		// Resolved per entry rather than once: each entry names its own
+		// destination, and for a honeybee destination this asks honeybee.
+		dstType, err := dstKind(entry.DstConnection)
+		if err != nil {
+			return targetmodel.TargetDataMigrationModel{}, fmt.Errorf(
+				"plans[%d].dstConnection: resolve destination connection type: %w", i, err)
+		}
+
+		switch src.kind {
+		case kindSSH:
+			built, err := buildFileSystemEntry(entry, *src.fs, dstType)
+			if err != nil {
+				return targetmodel.TargetDataMigrationModel{}, wrapEntryErr(i, err)
+			}
+			result.FileSystems = append(result.FileSystems, built)
+
+		case kindObjectStorage:
+			built, err := buildObjectStorageEntry(entry, *src.os, dstType)
+			if err != nil {
+				return targetmodel.TargetDataMigrationModel{}, wrapEntryErr(i, err)
+			}
+			result.ObjectStorages = append(result.ObjectStorages, built)
+
+		case kindDBMS:
+			built, err := buildDBEntry(entry, *src.db, dstType)
+			if err != nil {
+				return targetmodel.TargetDataMigrationModel{}, wrapEntryErr(i, err)
+			}
+			result.Databases = append(result.Databases, built)
+		}
+	}
+
+	// A source entry nothing names is reported rather than skipped. Skipping it
+	// is what the previous shape did, and a source that was discovered, sent and
+	// then silently left behind is the failure this request shape exists to end.
+	for key := range index {
+		if !referenced[key] {
+			return targetmodel.TargetDataMigrationModel{}, validationErr(
+				"source connection %q is in the source model but no plans entry names it", key)
+		}
+	}
+
+	out := targetmodel.TargetDataMigrationModel{TargetDataMigrationModel: result}
+	if msg := DuplicateDestination(out); msg != "" {
+		return targetmodel.TargetDataMigrationModel{}, validationErr("%s", msg)
+	}
+	return out, nil
+}
+
+// wrapEntryErr prefixes an entry's error with which entry it came from, keeping
+// a *ValidationError one so the controller still answers 400.
+func wrapEntryErr(i int, err error) error {
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		return validationErr("plans[%d]: %s", i, ve.Error())
+	}
+	return fmt.Errorf("plans[%d]: %w", i, err)
 }

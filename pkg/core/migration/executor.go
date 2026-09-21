@@ -71,7 +71,7 @@ func (e *Executor) Execute(migrationID string) {
 			defer close(progressCh)
 			_ = MigrateFileSystem(ctx, fs, progressCh)
 		}()
-		if e.drainProgress(m, migrationID, progressCh) {
+		if e.drainProgress(m, migrationID, fs.PlanEntryID, progressCh) {
 			hasFailure = true
 		}
 	}
@@ -86,7 +86,7 @@ func (e *Executor) Execute(migrationID string) {
 			defer close(progressCh)
 			_ = MigrateObjectStorage(ctx, oss, progressCh)
 		}()
-		if e.drainProgress(m, migrationID, progressCh) {
+		if e.drainProgress(m, migrationID, oss.PlanEntryID, progressCh) {
 			hasFailure = true
 		}
 	}
@@ -101,7 +101,7 @@ func (e *Executor) Execute(migrationID string) {
 			defer close(progressCh)
 			_ = MigrateDBMS(ctx, dbEntry, m.DBMSOnFailure, progressCh)
 		}()
-		if e.drainProgress(m, migrationID, progressCh) {
+		if e.drainProgress(m, migrationID, dbEntry.PlanEntryID, progressCh) {
 			hasFailure = true
 		}
 	}
@@ -125,7 +125,14 @@ func (e *Executor) Execute(migrationID string) {
 // drainProgress consumes all ProgressEvents from progressCh, writes a MigrationLog
 // per event, updates the in-memory migration counters, and saves progress to DB.
 // Returns true if any event carried status "failed".
-func (e *Executor) drainProgress(m *model.Migration, migrationID string, progressCh <-chan ProgressEvent) (hadFailure bool) {
+//
+// planEntryID is stamped on every log line the batch produces. It is passed in
+// rather than carried on ProgressEvent because the Migrate* functions are handed
+// one plan entry and never see the plan it sits in — only the loop calling this
+// knows which entry these events belong to.
+func (e *Executor) drainProgress(
+	m *model.Migration, migrationID, planEntryID string, progressCh <-chan ProgressEvent,
+) (hadFailure bool) {
 	for ev := range progressCh {
 		m.ProcessedItems++
 		m.TransferredBytes += ev.SizeBytes
@@ -141,6 +148,7 @@ func (e *Executor) drainProgress(m *model.Migration, migrationID string, progres
 		objKind, objName := failedObject(ev.Err)
 		entry := &model.MigrationLog{
 			MigrationID:      migrationID,
+			PlanEntryID:      planEntryID,
 			ItemPath:         ev.ItemPath,
 			Status:           ev.Status,
 			ErrorMsg:         errMsg,
@@ -192,6 +200,52 @@ func (e *Executor) Cancel(migrationID string) error {
 	return nil
 }
 
+// failedSet is the set of items a partial retry re-runs: the ones that failed in
+// the original migration.
+//
+// An item is identified by its plan entry and its path within that entry, not by
+// the path alone. Two entries of one plan legitimately carry the same path — one
+// source fanned out to two destinations, or two sources that scanned the same
+// directory — and keying on the path re-ran every entry that shared it, the ones
+// that had succeeded included. Re-running a successful transfer is not harmless:
+// it costs the bytes again, and where those entries write near each other the
+// re-run lands after the retry it was supposed to leave alone.
+type failedSet struct {
+	byEntry map[failedItem]bool
+	// byPath is consulted only when the logs predate PlanEntryID. Those rows do
+	// not say which entry they belong to, so the old path-only matching is the
+	// most that can be recovered from them — better than a retry that selects
+	// nothing at all.
+	byPath map[string]bool
+	legacy bool
+}
+
+type failedItem struct{ planEntryID, itemPath string }
+
+func newFailedSet(logs []model.MigrationLog) *failedSet {
+	s := &failedSet{
+		byEntry: make(map[failedItem]bool, len(logs)),
+		byPath:  make(map[string]bool, len(logs)),
+	}
+	for _, l := range logs {
+		if l.PlanEntryID == "" {
+			s.legacy = true
+		}
+		s.byEntry[failedItem{l.PlanEntryID, l.ItemPath}] = true
+		s.byPath[l.ItemPath] = true
+	}
+	return s
+}
+
+// has reports whether the item at itemPath, under the plan entry planEntryID,
+// failed in the migration being retried.
+func (s *failedSet) has(planEntryID, itemPath string) bool {
+	if s.legacy {
+		return s.byPath[itemPath]
+	}
+	return s.byEntry[failedItem{planEntryID, itemPath}]
+}
+
 // Retry creates a new Migration that re-runs items from the original migration
 // according to retryMode, then launches retryRun as a goroutine.
 //
@@ -216,16 +270,13 @@ func (e *Executor) Retry(migrationID, retryMode string) (*model.Migration, error
 		return nil, fmt.Errorf("migration %s has status %q: must be failed or cancelled to retry", migrationID, orig.Status)
 	}
 
-	var failedPaths map[string]bool
+	var failed *failedSet
 	if retryMode == "partial" {
 		logs, err := dao.ListAllMigrationLog(migrationID, "failed")
 		if err != nil {
 			return nil, fmt.Errorf("list failed logs: %w", err)
 		}
-		failedPaths = make(map[string]bool, len(logs))
-		for _, l := range logs {
-			failedPaths[l.ItemPath] = true
-		}
+		failed = newFailedSet(logs)
 	}
 
 	newID := uuid.New().String()
@@ -244,16 +295,16 @@ func (e *Executor) Retry(migrationID, retryMode string) (*model.Migration, error
 		return nil, fmt.Errorf("create retry migration: %w", err)
 	}
 
-	go e.retryRun(newMig.ID, retryMode, failedPaths)
+	go e.retryRun(newMig.ID, retryMode, failed)
 
 	return newMig, nil
 }
 
 // retryRun is the goroutine launched by Retry. It re-executes plan items according
 // to retryMode, performing a best-effort DROP of DBMS targets before each DBMS item.
-// failedPaths is non-nil only for partial mode (contains ItemPaths that failed in the
-// original migration).
-func (e *Executor) retryRun(migrationID, retryMode string, failedPaths map[string]bool) {
+// failed is non-nil only for partial mode, and holds the items that failed in the
+// original migration.
+func (e *Executor) retryRun(migrationID, retryMode string, failed *failedSet) {
 	ctx, cancel := context.WithCancel(context.Background())
 	e.mu.Lock()
 	e.cancels[migrationID] = cancel
@@ -296,7 +347,7 @@ func (e *Executor) retryRun(migrationID, retryMode string, failedPaths map[strin
 		if retryMode == "partial" {
 			var filtered []targetmodel.FSMigrationInfo
 			for _, folder := range fs.Folders {
-				if failedPaths[folder.SrcPath] {
+				if failed.has(fs.PlanEntryID, folder.SrcPath) {
 					filtered = append(filtered, folder)
 				}
 			}
@@ -312,7 +363,7 @@ func (e *Executor) retryRun(migrationID, retryMode string, failedPaths map[strin
 			defer close(progressCh)
 			_ = MigrateFileSystem(ctx, fs, progressCh)
 		}()
-		if e.drainProgress(m, migrationID, progressCh) {
+		if e.drainProgress(m, migrationID, fs.PlanEntryID, progressCh) {
 			hasFailure = true
 		}
 	}
@@ -327,7 +378,7 @@ func (e *Executor) retryRun(migrationID, retryMode string, failedPaths map[strin
 		if retryMode == "partial" {
 			var filtered []targetmodel.ObjectMigrationInfo
 			for _, bucket := range oss.Buckets {
-				if failedPaths[bucket.SrcPath] {
+				if failed.has(oss.PlanEntryID, bucket.SrcPath) {
 					filtered = append(filtered, bucket)
 				}
 			}
@@ -343,7 +394,7 @@ func (e *Executor) retryRun(migrationID, retryMode string, failedPaths map[strin
 			defer close(progressCh)
 			_ = MigrateObjectStorage(ctx, oss, progressCh)
 		}()
-		if e.drainProgress(m, migrationID, progressCh) {
+		if e.drainProgress(m, migrationID, oss.PlanEntryID, progressCh) {
 			hasFailure = true
 		}
 	}
@@ -363,7 +414,7 @@ func (e *Executor) retryRun(migrationID, retryMode string, failedPaths map[strin
 
 		for _, d := range dbEntry.Databases {
 			itemPath := fmt.Sprintf("%s/%s", dbType, d.SrcName)
-			if retryMode == "partial" && !failedPaths[itemPath] {
+			if retryMode == "partial" && !failed.has(dbEntry.PlanEntryID, itemPath) {
 				continue
 			}
 
@@ -449,7 +500,7 @@ func (e *Executor) retryRun(migrationID, retryMode string, failedPaths map[strin
 			defer close(progressCh)
 			_ = MigrateDBMS(ctx, dbEntry, m.DBMSOnFailure, progressCh)
 		}()
-		if e.drainProgressWithRollback(m, migrationID, progressCh, rollbackOf) {
+		if e.drainProgressWithRollback(m, migrationID, dbEntry.PlanEntryID, progressCh, rollbackOf) {
 			hasFailure = true
 		}
 	}
@@ -519,7 +570,10 @@ func failedObject(err error) (kind, name string) {
 // drainProgressWithRollback is like drainProgress but additionally stamps
 // RollbackStatus and RollbackErrorMsg on every created MigrationLog.
 // Used for DBMS retry items where a DROP was attempted before migration.
-func (e *Executor) drainProgressWithRollback(m *model.Migration, migrationID string, progressCh <-chan ProgressEvent, rollbackOf map[string]rollbackOutcome) (hadFailure bool) {
+func (e *Executor) drainProgressWithRollback(
+	m *model.Migration, migrationID, planEntryID string,
+	progressCh <-chan ProgressEvent, rollbackOf map[string]rollbackOutcome,
+) (hadFailure bool) {
 	for ev := range progressCh {
 		m.ProcessedItems++
 		m.TransferredBytes += ev.SizeBytes
@@ -541,6 +595,7 @@ func (e *Executor) drainProgressWithRollback(m *model.Migration, migrationID str
 		objKind, objName := failedObject(ev.Err)
 		entry := &model.MigrationLog{
 			MigrationID:      migrationID,
+			PlanEntryID:      planEntryID,
 			ItemPath:         ev.ItemPath,
 			Status:           ev.Status,
 			ErrorMsg:         errMsg,

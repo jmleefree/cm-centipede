@@ -58,6 +58,25 @@ type Migration struct {
 type MigrationLog struct {
 	ID          uint   `gorm:"primaryKey;autoIncrement"  json:"id"`
 	MigrationID string `gorm:"column:migration_id;index" json:"migrationId"`
+
+	// PlanEntryID names the plan entry this item came from
+	// (targetmodel.Migration*Model.PlanEntryID). ItemPath alone does not identify
+	// it: two entries of one plan legitimately carry the same path — one source
+	// fanned out to two destinations, or two sources that scanned the same
+	// directory — and their log lines were indistinguishable.
+	//
+	// It is the only thing about the entry kept here. Which host the item was
+	// read from, where it was written and under what rules are all in the plan,
+	// which GET /centipede/migration/{id} returns beside these logs; copying any
+	// of it into every row would not save the reader that lookup.
+	//
+	// Not indexed: nothing queries by it. One migration's logs are read whole, by
+	// the list endpoint and by the retry that groups them in memory, so an index
+	// here would only be paid for on every insert.
+	//
+	// Empty on rows written before this field existed.
+	PlanEntryID string `gorm:"column:plan_entry_id"      json:"planEntryId,omitempty"`
+
 	// ItemPath: absolute file path (SSH) | object key (ObjectStorage) | table/collection name (DBMS)
 	ItemPath   string `gorm:"column:item_path"          json:"itemPath"`
 	Status     string `gorm:"column:status"             json:"status"`
@@ -354,6 +373,11 @@ func lastDaysWindow(lastDays int, now time.Time) (from, toExcl string) {
 
 // ValidationDetailItem describes the verification result for a single item.
 type ValidationDetailItem struct {
+	// PlanEntryID names the plan entry this detail is about, the same id
+	// MigrationLog carries. Without it a plan of several entries reports every
+	// one of them under the same ItemPath — "filesystem" for a whole entry that
+	// could not be resolved — and nothing says which.
+	PlanEntryID string `json:"planEntryId,omitempty"`
 	// ItemPath: file path | object key | DBMS target
 	// ("{database}/{table}", "{database}/{table}.{column}", "{database}/{kind}:{name}").
 	ItemPath string `json:"itemPath"`

@@ -14,6 +14,7 @@ import (
 	"github.com/cloud-barista/cm-centipede/pkg/api/rest/model"
 	"github.com/cloud-barista/cm-centipede/pkg/connsec"
 	migrationpkg "github.com/cloud-barista/cm-centipede/pkg/core/migration"
+	"github.com/cloud-barista/cm-centipede/pkg/core/plan"
 	"github.com/cloud-barista/cm-centipede/pkg/dao"
 )
 
@@ -47,10 +48,10 @@ func CreateMigration(c echo.Context) error {
 				model.DBMSOnFailureCleanup, model.DBMSOnFailureKeep, req.DBMSOnFailure)))
 	}
 
-	// The plan arrives as POST /plans/target answered it, so both checks below
-	// are about a plan that was edited, hand-written, or issued elsewhere.
-	// Execution is asynchronous: anything not caught here surfaces as a
-	// half-finished migration rather than as a failed request.
+	// The plan arrives as POST /plans/target answered it, so every check below is
+	// about a plan that was edited, hand-written, or issued elsewhere. Execution
+	// is asynchronous: anything not caught here surfaces as a half-finished
+	// migration rather than as a failed request.
 
 	// Structure first. A ref whose sub-struct does not match its source is
 	// invisible to the decryptability check — there are no fields to decrypt —
@@ -64,6 +65,22 @@ func CreateMigration(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse("plan "+err.Error()))
 	}
 
+	// Two entries writing to the same place is how a multi-entry plan loses data:
+	// they run one after another, so the second overwrites what the first wrote.
+	// The plan layer refuses to build one, which leaves this the way such a plan
+	// still arrives.
+	if msg := plan.DuplicateDestination(req.Plan); msg != "" {
+		return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse("plan: "+msg))
+	}
+
+	// Entry names have to be distinct before anything is written under them:
+	// they are what a log line, a validation detail and a partial retry identify
+	// an entry by, and two entries sharing one put all three on top of each other.
+	if dup := plan.DuplicateEntryID(req.Plan); dup != "" {
+		return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse(
+			fmt.Sprintf("plan: planEntryId %q is carried by more than one entry", dup)))
+	}
+
 	// Then whether this server can actually open what it was handed.
 	if err := connsec.VerifyPlanDecryptable(req.Plan); err != nil {
 		return c.JSON(http.StatusBadRequest, model.SimpleErrorResponse(
@@ -71,6 +88,11 @@ func CreateMigration(c echo.Context) error {
 				"by another cm-centipede instance, or before the encryption passphrase changed. "+
 				"Re-run POST /centipede/plans/target to get one this server can use: "+err.Error()))
 	}
+
+	// An edited or hand-written plan may name none of its entries. Naming them
+	// before the record is stored means execution, logging and retry all read one
+	// thing, and the plan the caller can fetch back says what its logs point at.
+	plan.AssignMissingEntryIDs(&req.Plan)
 
 	m := &model.Migration{
 		ID:            uuid.New().String(),

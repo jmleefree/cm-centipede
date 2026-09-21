@@ -149,6 +149,12 @@ echo "    scan root $SCAN_ROOT"
 # =============================================================================
 # 4. Build the plan
 # =============================================================================
+# plans is an array: one entry per (source entry, destination). This example has
+# one connection going to one bucket, so it holds a single entry. A source group
+# with several connections would send several, each naming its own destination —
+# which is why srcConnection is there, saying which entry of the source model
+# this destination is for.
+#
 # The two ends are named in completely different ways, and both are worth seeing
 # side by side: the source carries its own S3 keys, while the target is a
 # reference cm-centipede resolves through cm-beetle and cb-tumblebug, with no key
@@ -168,21 +174,27 @@ RESPONSE=$(curl -s -X POST "$CP_BASE/plans/target" -u "$CP_AUTH" \
   -H 'Content-Type: application/json' \
   -d "{
         \"source\": $SRC_MODEL,
-        \"dstConnection\": {
-          \"source\": \"beetleObjectStorage\",
-          \"beetleObjectStorage\": {
-            \"nsId\": \"$NS_ID\",
-            \"osId\": \"$OS_ID\"
-          }
-        },
-        \"objectStorageFilter\": {
-          \"targetMapping\": {
-            \"srcName\": \"$SCAN_ROOT\"
+        \"plans\": [{
+          \"srcConnection\": {
+            \"source\": \"honeybee\",
+            \"honeybee\": { \"connectionId\": \"$CONN_ID\" }
           },
-          \"rules\": [
-            { \"action\": \"exclude\", \"type\": \"glob\", \"pattern\": \"**/*.zip\" }
-          ]
-        }
+          \"dstConnection\": {
+            \"source\": \"beetleObjectStorage\",
+            \"beetleObjectStorage\": {
+              \"nsId\": \"$NS_ID\",
+              \"osId\": \"$OS_ID\"
+            }
+          },
+          \"objectStorageFilter\": {
+            \"targetMapping\": {
+              \"srcName\": \"$SCAN_ROOT\"
+            },
+            \"rules\": [
+              { \"action\": \"exclude\", \"type\": \"glob\", \"pattern\": \"**/*.zip\" }
+            ]
+          }
+        }]
       }")
 
 # Every cm-centipede response is wrapped in {"success":..., "data":...}, and the

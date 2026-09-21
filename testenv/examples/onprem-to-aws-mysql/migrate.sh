@@ -145,6 +145,12 @@ echo "    collected: $(echo "$SRC_MODEL" | jq -r '[.sourceDataMigrationModel.dat
 # =============================================================================
 # 4. Build the plan
 # =============================================================================
+# plans is an array: one entry per (source entry, destination). This example has
+# one connection going to one instance, so it holds a single entry. A source
+# group with several connections would send several, each naming its own
+# destination — which is why srcConnection is there, saying which entry of the
+# source model this destination is for.
+#
 # dstConnection is a reference plus one secret. beetleDb names an instance that
 # already exists and cm-centipede reads its host, port and admin account from
 # cm-beetle — but not the password, which cm-beetle never hands back, so it
@@ -168,25 +174,31 @@ RESPONSE=$(curl -s -X POST "$CP_BASE/plans/target" -u "$CP_AUTH" \
   -H 'Content-Type: application/json' \
   -d "{
         \"source\": $SRC_MODEL,
-        \"dstConnection\": {
-          \"source\": \"beetleDb\",
-          \"beetleDb\": {
-            \"nsId\": \"$NS_ID\",
-            \"rdbmsId\": \"$RDBMS_ID\",
-            \"password\": \"$DB_PASSWORD\",
-            \"tlsMode\": \"prefer\"
-          }
-        },
-        \"dbmsFilter\": {
-          \"databases\": [
-            {
-              \"targetMapping\": { \"srcName\": \"$SRC_DB\", \"dstName\": \"$DST_DB\" },
-              \"rules\": [
-                { \"type\": \"object_exclude\", \"kind\": \"view\", \"name\": \"v_low_stock_alert\" }
-              ]
+        \"plans\": [{
+          \"srcConnection\": {
+            \"source\": \"honeybee\",
+            \"honeybee\": { \"connectionId\": \"$CONN_ID\" }
+          },
+          \"dstConnection\": {
+            \"source\": \"beetleDb\",
+            \"beetleDb\": {
+              \"nsId\": \"$NS_ID\",
+              \"rdbmsId\": \"$RDBMS_ID\",
+              \"password\": \"$DB_PASSWORD\",
+              \"tlsMode\": \"prefer\"
             }
-          ]
-        }
+          },
+          \"dbmsFilter\": {
+            \"databases\": [
+              {
+                \"targetMapping\": { \"srcName\": \"$SRC_DB\", \"dstName\": \"$DST_DB\" },
+                \"rules\": [
+                  { \"type\": \"object_exclude\", \"kind\": \"view\", \"name\": \"v_low_stock_alert\" }
+                ]
+              }
+            ]
+          }
+        }]
       }")
 
 # Every cm-centipede response is wrapped in {"success":..., "data":...}, and the

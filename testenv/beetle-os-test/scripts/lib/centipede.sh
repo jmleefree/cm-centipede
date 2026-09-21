@@ -108,12 +108,22 @@ cp_dst_connection() {
 #   SRC_MODEL is honeybee's /objectstorage/refined response, which is already a
 #   SourceDataMigrationModel and goes in unchanged.
 #   On success it fills CP_PLAN, CP_SRC_PATH and CP_DST_PATH and returns 0.
+#
+#   plans is an array: one entry per (source entry, destination). This cell
+#   migrates one bucket to one target, so it holds a single entry, and
+#   srcConnection is lifted straight out of the source model - it is the
+#   connection honeybee produced that entry with, so nothing has to be threaded
+#   in alongside it.
 cp_plan() {
 	local src_model="$1" os_id="$2" tmp code body
 	CP_PLAN=""; CP_ERROR=""; CP_SRC_PATH=""; CP_DST_PATH=""
 
 	body="$(jq -cn --argjson s "$src_model" --argjson d "$(cp_dst_connection "$os_id")" \
-		'{source:$s, dstConnection:$d}')"
+		'{source:$s,
+		  plans:[{
+		    srcConnection: $s.sourceDataMigrationModel.objectStorages[0].connection,
+		    dstConnection: $d
+		  }]}')"
 
 	tmp="$(mktemp)"
 	code="$(cp_curl POST "/plans/target" "$body" "$tmp")"

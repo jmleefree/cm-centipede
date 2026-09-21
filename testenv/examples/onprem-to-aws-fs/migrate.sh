@@ -135,6 +135,12 @@ echo "    scan root $SCAN_ROOT"
 # =============================================================================
 # 4. Build the plan
 # =============================================================================
+# plans is an array: one entry per (source entry, destination). This example has
+# one connection going to one node, so it holds a single entry. A source group
+# with several connections would send several, each naming its own destination —
+# which is why srcConnection is there, saying which entry of the source model
+# this destination is for.
+#
 # dstConnection is a reference, not credentials: beetleSsh names a node that
 # already exists, and cm-centipede resolves its address, account and private key
 # through cm-beetle.
@@ -154,24 +160,30 @@ RESPONSE=$(curl -s -X POST "$CP_BASE/plans/target" -u "$CP_AUTH" \
   -H 'Content-Type: application/json' \
   -d "{
         \"source\": $SRC_MODEL,
-        \"dstConnection\": {
-          \"source\": \"beetleSsh\",
-          \"beetleSsh\": {
-            \"nsId\": \"$NS_ID\",
-            \"infraId\": \"$INFRA_ID\",
-            \"nodeId\": \"$NODE_ID\"
-          }
-        },
-        \"fileSystemFilter\": {
-          \"targetMapping\": {
-            \"srcName\": \"$SCAN_ROOT\",
-            \"dstName\": \"$DST_PATH\"
+        \"plans\": [{
+          \"srcConnection\": {
+            \"source\": \"honeybee\",
+            \"honeybee\": { \"connectionId\": \"$CONN_ID\" }
           },
-          \"rules\": [
-            { \"action\": \"exclude\", \"type\": \"glob\", \"pattern\": \"**/*.log\" },
-            { \"action\": \"exclude\", \"type\": \"size\", \"op\": \">=\", \"value\": 1048576 }
-          ]
-        }
+          \"dstConnection\": {
+            \"source\": \"beetleSsh\",
+            \"beetleSsh\": {
+              \"nsId\": \"$NS_ID\",
+              \"infraId\": \"$INFRA_ID\",
+              \"nodeId\": \"$NODE_ID\"
+            }
+          },
+          \"fileSystemFilter\": {
+            \"targetMapping\": {
+              \"srcName\": \"$SCAN_ROOT\",
+              \"dstName\": \"$DST_PATH\"
+            },
+            \"rules\": [
+              { \"action\": \"exclude\", \"type\": \"glob\", \"pattern\": \"**/*.log\" },
+              { \"action\": \"exclude\", \"type\": \"size\", \"op\": \">=\", \"value\": 1048576 }
+            ]
+          }
+        }]
       }")
 
 # Every cm-centipede response is wrapped in {"success":..., "data":...}, and the

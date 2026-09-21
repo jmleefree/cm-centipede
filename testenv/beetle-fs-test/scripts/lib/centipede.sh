@@ -133,6 +133,12 @@ cp_dst_connection() {
 #   SRC_MODEL is honeybee's /fs/refined response, which is already a
 #   SourceDataMigrationModel and goes in unchanged.
 #   On success it fills CP_PLAN, CP_SRC_PATH and CP_DST_PATH and returns 0.
+#
+#   plans is an array: one entry per (source entry, destination). This cell
+#   migrates one connection to one node, so it holds a single entry, and
+#   srcConnection is lifted straight out of the source model - it is the
+#   connection honeybee produced that entry with, so nothing has to be threaded
+#   in alongside it.
 cp_plan() {
 	local src_model="$1" infra="$2" node="$3" scan_root="$4" dst_path="$5" tmp code body
 	CP_PLAN=""; CP_ERROR=""; CP_SRC_PATH=""; CP_DST_PATH=""
@@ -140,8 +146,12 @@ cp_plan() {
 	body="$(jq -cn --argjson s "$src_model" \
 		--argjson d "$(cp_dst_connection "$infra" "$node")" \
 		--arg src "$scan_root" --arg dst "$dst_path" \
-		'{source:$s, dstConnection:$d,
-		  fileSystemFilter:{targetMapping:{srcName:$src, dstName:$dst}}}')"
+		'{source:$s,
+		  plans:[{
+		    srcConnection: $s.sourceDataMigrationModel.fileSystems[0].connection,
+		    dstConnection: $d,
+		    fileSystemFilter:{targetMapping:{srcName:$src, dstName:$dst}}
+		  }]}')"
 
 	tmp="$(mktemp)"
 	code="$(cp_curl POST "/plans/target" "$body" "$tmp")"

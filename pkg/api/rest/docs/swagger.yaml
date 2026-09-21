@@ -760,6 +760,11 @@ definitions:
         items:
           type: string
         type: array
+      planEntryId:
+        description: |-
+          PlanEntryID names this entry within the plan
+          — see MigrationFileSystemModel.PlanEntryID.
+        type: string
       srcConnection:
         $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ConnectionRef'
     required:
@@ -788,6 +793,25 @@ definitions:
         items:
           $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_target-model.FSMigrationInfo'
         type: array
+      planEntryId:
+        description: |-
+          PlanEntryID names this entry within the plan. It is what a migration log,
+          a validation detail and a per-entry retry refer to, so that none of them
+          has to identify an entry by its position in the array — a position is not
+          a name, and nothing outside the plan can hold on to one.
+
+          "entry", not "item": an item is the folder, bucket or database inside one
+          of these (see countPlanItems, MigrationLog.ItemPath, Migration.TotalItems),
+          and a name that meant both layers at once would be worse than the index it
+          replaces. Not "id" either — an entry is anonymous in its own document,
+          sitting in fileSystems[] with no type name beside it, so "id" alone would
+          not say what kind of id it is. The log field that refers to it is spelled
+          the same, which is the point: one token to search for in both documents.
+
+          Assigned by POST /plans/target. A plan that arrives without one — edited,
+          hand-written, issued elsewhere — is given ids by CreateMigration before it
+          is stored, so a stored plan always has them.
+        type: string
       srcConnection:
         $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ConnectionRef'
       strategy:
@@ -823,6 +847,11 @@ definitions:
         items:
           type: string
         type: array
+      planEntryId:
+        description: |-
+          PlanEntryID names this entry within the plan
+          — see MigrationFileSystemModel.PlanEntryID.
+        type: string
       srcConnection:
         $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ConnectionRef'
     required:
@@ -1115,6 +1144,25 @@ definitions:
         type: string
       migrationId:
         type: string
+      planEntryId:
+        description: |-
+          PlanEntryID names the plan entry this item came from
+          (targetmodel.Migration*Model.PlanEntryID). ItemPath alone does not identify
+          it: two entries of one plan legitimately carry the same path — one source
+          fanned out to two destinations, or two sources that scanned the same
+          directory — and their log lines were indistinguishable.
+
+          It is the only thing about the entry kept here. Which host the item was
+          read from, where it was written and under what rules are all in the plan,
+          which GET /centipede/migration/{id} returns beside these logs; copying any
+          of it into every row would not save the reader that lookup.
+
+          Not indexed: nothing queries by it. One migration's logs are read whole, by
+          the list endpoint and by the retry that groups them in memory, so an index
+          here would only be paid for on every insert.
+
+          Empty on rows written before this field existed.
+        type: string
       rollbackErrorMsg:
         type: string
       rollbackStatus:
@@ -1182,6 +1230,33 @@ definitions:
       validationStatus:
         type: string
     type: object
+  github_com_cloud-barista_cm-centipede_pkg_api_rest_model.PlanEntry:
+    properties:
+      dbmsFilter:
+        $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.DBMSFilter'
+      dstConnection:
+        $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ConnectionRef'
+      fileSystemFilter:
+        $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.FileSystemFilter'
+      fileSystemStrategy:
+        description: |-
+          FileSystemStrategy is the transfer strategy applied to filesystem (SSH→SSH)
+          tasks. Empty is normalised to "relay" (safer default: avoids agent-forward
+          setup requirements). It has no effect on object-storage or DBMS tasks, where
+          relay is always used / not applicable.
+        enum:
+        - auto
+        - direct
+        - relay
+        type: string
+      objectStorageFilter:
+        $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ObjectStorageFilter'
+      srcConnection:
+        $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ConnectionRef'
+    required:
+    - dstConnection
+    - srcConnection
+    type: object
   github_com_cloud-barista_cm-centipede_pkg_api_rest_model.PlanSummary:
     properties:
       databases:
@@ -1210,29 +1285,15 @@ definitions:
     type: object
   github_com_cloud-barista_cm-centipede_pkg_api_rest_model.TargetPlanReq:
     properties:
-      dbmsFilter:
-        $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.DBMSFilter'
-      dstConnection:
-        $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ConnectionRef'
-      fileSystemFilter:
-        $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.FileSystemFilter'
-      fileSystemStrategy:
-        description: |-
-          FileSystemStrategy is the transfer strategy applied to filesystem (SSH→SSH)
-          tasks. Empty is normalised to "relay" (safer default: avoids agent-forward
-          setup requirements). It has no effect on object-storage or DBMS tasks, where
-          relay is always used / not applicable.
-        enum:
-        - auto
-        - direct
-        - relay
-        type: string
-      objectStorageFilter:
-        $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_common-model.ObjectStorageFilter'
+      plans:
+        items:
+          $ref: '#/definitions/github_com_cloud-barista_cm-centipede_pkg_api_rest_model.PlanEntry'
+        minItems: 1
+        type: array
       source:
         $ref: '#/definitions/github_com_cloud-barista_cm-centipede_dmdl_source-model.SourceDataMigrationModel'
     required:
-    - dstConnection
+    - plans
     - source
     type: object
   github_com_cloud-barista_cm-centipede_pkg_api_rest_model.ValidationDetailItem:
@@ -1243,6 +1304,13 @@ definitions:
           ("{database}/{table}", "{database}/{table}.{column}", "{database}/{kind}:{name}").
         type: string
       message:
+        type: string
+      planEntryId:
+        description: |-
+          PlanEntryID names the plan entry this detail is about, the same id
+          MigrationLog carries. Without it a plan of several entries reports every
+          one of them under the same ItemPath — "filesystem" for a whole entry that
+          could not be resolved — and nothing says which.
         type: string
       status:
         description: |-
