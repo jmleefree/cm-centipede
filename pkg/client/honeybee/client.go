@@ -74,6 +74,12 @@ type HoneybeeConnConfig struct {
 	DBTLSMode  string
 	DBTLSCAPEM string
 
+	// DBAuthSource is the MongoDB authSource database. Unlike the TLS fields it
+	// is read on both paths — transxex.SSHTunnelConfig carries one too — because
+	// which database holds the account is a property of the server, not of how
+	// the connection reaches it. Empty → the driver defaults to "admin".
+	DBAuthSource string
+
 	// SSH tunnel for DBMS (non-empty when db_access_type = "ssh-tunnel")
 	SSHTunnelHost       string
 	SSHTunnelPort       int
@@ -108,6 +114,7 @@ type honeybeeConnectionInfo struct {
 	DBConnectTimeout int    `json:"db_connect_timeout,omitempty"`
 	DBTLSMode        string `json:"db_tls_mode,omitempty"`
 	DBTLSCAPEM       string `json:"db_tls_ca_pem,omitempty"`
+	DBAuthSource     string `json:"db_auth_source,omitempty"`
 
 	// SourceGroupID is the bridge to the provider: the connection knows which
 	// group it belongs to, and the group is where provider_name and region_name
@@ -300,9 +307,11 @@ func fillDBMS(cfg *HoneybeeConnConfig, raw *honeybeeConnectionInfo) error {
 	cfg.DBHost = raw.DBHost
 	cfg.Database = raw.DBName
 	// Not decrypted: honeybee RSA-wraps credentials, and a CA certificate is a
-	// public value.
+	// public value. So is the authSource: honeybee stores it in plain text for
+	// the same reason.
 	cfg.DBTLSMode = raw.DBTLSMode
 	cfg.DBTLSCAPEM = raw.DBTLSCAPEM
+	cfg.DBAuthSource = raw.DBAuthSource
 
 	port, _ := strconv.Atoi(raw.DBPort)
 	cfg.DBPort = port

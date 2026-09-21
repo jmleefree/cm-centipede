@@ -100,9 +100,10 @@ hb_source_group() {
 #
 #   direct connects to the published port; ssh tunnels to the server inside the
 #   container. Either way db_name is stated: this container holds one seeded
-#   database, and naming it makes that database the authentication database on
-#   MongoDB, where the account actually exists (the URI transx-ex builds carries
-#   no authSource, so the database in the path is the auth database).
+#   database, and naming it scopes the inspection to that one rather than every
+#   user database on the server. It is not the authentication database: that is
+#   db_auth_source, which this body leaves unset, so the URI transx-ex builds
+#   falls back to admin - where the account also exists.
 _hb_conn_body() {
 	local engine="$1" name="$2" db="${SRC_DB:-matrix_db}"
 

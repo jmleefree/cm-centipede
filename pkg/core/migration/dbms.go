@@ -135,21 +135,23 @@ func HoneybeeToDBMSLocation(cfg honeybee.HoneybeeConnConfig, database string) tr
 			PrivateKey: cfg.SSHTunnelPrivateKey,
 		}
 		tunnel := &transxex.SSHTunnelConfig{
-			SSH:      sshCfg,
-			DBHost:   cfg.DBHost,
-			DBPort:   cfg.DBPort,
-			Username: cfg.DBUsername,
-			Password: cfg.DBPassword,
+			SSH:        sshCfg,
+			DBHost:     cfg.DBHost,
+			DBPort:     cfg.DBPort,
+			Username:   cfg.DBUsername,
+			Password:   cfg.DBPassword,
+			AuthSource: cfg.DBAuthSource,
 		}
 		return DBMSLocationSSHTunnel(cfg.DBType, database, tunnel)
 	}
 	direct := &transxex.DirectConfig{
-		Host:     cfg.DBHost,
-		Port:     cfg.DBPort,
-		Username: cfg.DBUsername,
-		Password: cfg.DBPassword,
-		TLSMode:  cfg.DBTLSMode,
-		TLSCAPEM: cfg.DBTLSCAPEM,
+		Host:       cfg.DBHost,
+		Port:       cfg.DBPort,
+		Username:   cfg.DBUsername,
+		Password:   cfg.DBPassword,
+		TLSMode:    cfg.DBTLSMode,
+		TLSCAPEM:   cfg.DBTLSCAPEM,
+		AuthSource: cfg.DBAuthSource,
 	}
 	return DBMSLocationDirect(cfg.DBType, database, direct)
 }
