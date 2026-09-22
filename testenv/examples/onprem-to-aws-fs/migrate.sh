@@ -91,7 +91,8 @@ RESPONSE=$(curl -s -X POST "$HB_BASE/source_group/$SG_ID/connection_info" \
         \"ip_address\": \"$HOST_IP\",
         \"ssh_port\": \"$SRC_PORT\",
         \"user\": \"$SRC_USER\",
-        \"private_key\": $SRC_KEY_JSON
+        \"private_key\": $SRC_KEY_JSON,
+        \"fs_scan_path\": \"$SRC_PATH\"
       }")
 
 echo "$RESPONSE"
@@ -100,7 +101,10 @@ CONN_ID=$(echo "$RESPONSE" | jq -r .id)
 # =============================================================================
 # 3. Inspect the source
 # =============================================================================
-# Every metric is asked for here. Each one costs a full walk of the tree on the
+# The path is not in this request: it is the connection's fs_scan_path, set in
+# step 2. Only how much detail to collect is asked for here.
+#
+# Every metric is asked for. Each one costs a full walk of the tree on the
 # source, so a large dataset is a reason to ask for fewer.
 # max_depth 0 lists the whole tree.
 
@@ -109,7 +113,6 @@ echo "==> 3/6  Inspecting $SRC_PATH"
 curl -s -X POST "$HB_BASE/source_group/$SG_ID/connection_info/$CONN_ID/import/fs" \
   -H 'Content-Type: application/json' \
   -d "{
-        \"path\": \"$SRC_PATH\",
         \"max_depth\": 0,
         \"metric\": {
           \"total_size\": true,

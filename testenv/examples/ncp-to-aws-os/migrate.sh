@@ -109,9 +109,10 @@ CONN_ID=$(echo "$RESPONSE" | jq -r .id)
 # =============================================================================
 # 3. Inspect the source bucket
 # =============================================================================
-# One connection holds one bucket's result: the bucket below is stored against
-# CONN_ID, so a second bucket inspected through the same connection would
-# overwrite this one. A second bucket means a second connection.
+# The bucket is not in this request: it is the connection's os_scan_bucket, set
+# in step 2. One connection holds one bucket, and one result — pointing an
+# existing connection at another bucket marks its collected result stale, so a
+# second bucket means a second connection.
 #
 # Every metric is asked for here. Each one costs a full pass over the bucket's
 # keys, so a bucket of any size is a reason to ask for fewer. "prefix" is object
@@ -124,7 +125,6 @@ echo "==> 3/6  Inspecting bucket $SRC_BUCKET"
 curl -s -X POST "$HB_BASE/source_group/$SG_ID/connection_info/$CONN_ID/import/objectstorage" \
   -H 'Content-Type: application/json' \
   -d "{
-        \"bucket\": \"$SRC_BUCKET\",
         \"metric\": {
           \"total_size\": true,
           \"object_count\": true,

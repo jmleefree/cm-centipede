@@ -158,7 +158,8 @@ curl -s -X POST http://localhost:8081/honeybee/source_group/$SG_ID/connection_in
         "os_endpoint": "http://172.24.78.163:39000",
         "os_access_key_id": "minioadmin",
         "os_secret_access_key": "minioadmin123",
-        "os_use_ssl": false
+        "os_use_ssl": false,
+        "os_scan_bucket": "images"
       }'
 ```
 
@@ -184,7 +185,6 @@ curl -s -X POST \
   http://localhost:8081/honeybee/source_group/$SG_ID/connection_info/$CONN_ID/import/objectstorage \
   -H 'Content-Type: application/json' \
   -d '{
-        "bucket": "images",
         "metric": {
           "total_size": true,
           "object_count": true,

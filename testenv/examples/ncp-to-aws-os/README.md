@@ -174,7 +174,7 @@ built host on both sides, which is what a private gateway or a VPC endpoint
 needs.
 
 **`region_name` is the only region you name.** The connection below carries the
-keys and nothing else — no endpoint, and no region of its own.
+keys and the bucket to read — no endpoint, and no region of its own.
 
 ```bash
 curl -s -X POST http://localhost:8081/honeybee/source_group/$SG_ID/connection_info \
@@ -183,7 +183,8 @@ curl -s -X POST http://localhost:8081/honeybee/source_group/$SG_ID/connection_in
         "name": "ncp-to-aws-os-src",
         "os_access_type": "direct",
         "os_access_key_id": "<the NCP access key>",
-        "os_secret_access_key": "<the NCP secret key>"
+        "os_secret_access_key": "<the NCP secret key>",
+        "os_scan_bucket": "cptf-ncp-bucket-test"
       }'
 ```
 
@@ -200,7 +201,6 @@ curl -s -X POST \
   http://localhost:8081/honeybee/source_group/$SG_ID/connection_info/$CONN_ID/import/objectstorage \
   -H 'Content-Type: application/json' \
   -d '{
-        "bucket": "cptf-ncp-bucket-test",
         "metric": {
           "total_size": true,
           "object_count": true,

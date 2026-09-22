@@ -154,7 +154,8 @@ curl -s -X POST http://localhost:8081/honeybee/source_group/$SG_ID/connection_in
         "ip_address": "172.24.78.163",
         "ssh_port": "32210",
         "user": "root",
-        "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n..."
+        "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n...",
+        "fs_scan_path": "/testdata"
       }'
 ```
 
@@ -192,7 +193,6 @@ curl -s -X POST \
   http://localhost:8081/honeybee/source_group/$SG_ID/connection_info/$CONN_ID/import/fs \
   -H 'Content-Type: application/json' \
   -d '{
-        "path": "/testdata",
         "max_depth": 0,
         "metric": {
           "total_size": true,

@@ -118,18 +118,24 @@ hb_source_group() {
 #   The endpoint carries its scheme on purpose. honeybee treats a scheme typed
 #   into os_endpoint as an explicit statement about TLS and lets it beat
 #   os_use_ssl, so "http://" is what actually turns TLS off for a local MinIO.
+#
+#   os_scan_bucket is what the inspect reads, and honeybee requires it here: the
+#   bucket belongs to the connection, not to the import request. That is why
+#   this folder already registers one connection per bucket.
 _hb_conn_body() {
 	local bucket="$1" name="$2"
 	jq -n --arg n "$name" --arg d "matrix source bucket $bucket (direct)" \
 		--arg ep "$(src_endpoint)" \
 		--arg ak "${MINIO_ROOT_USER:-minioadmin}" \
 		--arg sk "${MINIO_ROOT_PASSWORD:-minioadmin123}" \
+		--arg bucket "$bucket" \
 		'{name:$n, description:$d,
 		  os_access_type:"direct",
 		  os_endpoint:$ep,
 		  os_access_key_id:$ak,
 		  os_secret_access_key:$sk,
-		  os_use_ssl:false}'
+		  os_use_ssl:false,
+		  os_scan_bucket:$bucket}'
 }
 
 # hb_connection SG_ID BUCKET -> ConnectionInfo id (POST when absent, PUT to update)
@@ -156,14 +162,18 @@ hb_connection() {
 # Collection
 # ---------------------------------------------------------------------------
 
-# hb_import SG_ID CONN_ID BUCKET — inspect one bucket through this connection.
+# hb_import SG_ID CONN_ID BUCKET — inspect this connection's bucket.
 #
 #   No metric is requested. The plan reads Path and Folders[].Key and nothing
 #   else, and each metric field costs a full object scan on the source; the
 #   object count this folder prints comes from the container's own mc instead.
+#
+#   BUCKET is for the failure message only. The target is the connection's
+#   os_scan_bucket, set at registration, so the body carries just the metric
+#   selection — none here, hence the empty object.
 hb_import() {
 	local sg="$1" conn="$2" bucket="$3" tmp code body
-	body="$(jq -cn --arg b "$bucket" '{bucket:$b}')"
+	body='{}'
 	tmp="$(mktemp)"
 	code="$(hb_curl POST "/source_group/$sg/connection_info/$conn/import/objectstorage" "$body" "$tmp")"
 	if ! hb_ok "$code"; then

@@ -133,6 +133,10 @@ hb_source_group() {
 #   one. No password is sent: the image refuses password authentication, and
 #   cm-centipede could not use one anyway — transx-ex's SSH transport has no
 #   password field.
+#
+#   fs_scan_path is what the inspect reads: the scan root belongs to the
+#   connection, not to the import request, so it is set here once and every
+#   later import uses it.
 _hb_conn_body() {
 	local name="$1"
 	jq -n --arg n "$name" --arg d "beetle-fs-test source container (key auth, root)" \
@@ -140,8 +144,10 @@ _hb_conn_body() {
 		--arg port "$(src_ssh_port)" \
 		--arg user "$SRC_SSH_USER" \
 		--arg key "$(src_private_key)" \
+		--arg path "$(src_path)" \
 		'{name:$n, description:$d,
-		  ip_address:$ip, ssh_port:$port, user:$user, private_key:$key}'
+		  ip_address:$ip, ssh_port:$port, user:$user, private_key:$key,
+		  fs_scan_path:$path}'
 }
 
 # What the last hb_connection call produced and reported about itself.
@@ -259,11 +265,13 @@ hb_assert_connection() {
 #   max_depth is left at its default too. The plan is built against the scan root
 #   rather than any listed folder — the whole dataset migrates as one — so the
 #   depth of the listing changes what is reported, not what moves.
+#
+#   The scan root is not sent: it is the connection's fs_scan_path, set by
+#   hb_connection. What is left in the body describes this one collection.
 hb_import() {
 	local sg="$1" conn="$2" tmp code body
-	body="$(jq -cn --arg p "$(src_path)" \
-		--argjson d "${FS_SCAN_MAX_DEPTH:-0}" \
-		'{path:$p} + (if $d > 0 then {max_depth:$d} else {} end)')"
+	body="$(jq -cn --argjson d "${FS_SCAN_MAX_DEPTH:-0}" \
+		'if $d > 0 then {max_depth:$d} else {} end')"
 	tmp="$(mktemp)"
 	code="$(hb_curl POST "/source_group/$sg/connection_info/$conn/import/fs" "$body" "$tmp")"
 	if ! hb_ok "$code"; then
