@@ -26,6 +26,22 @@ const (
 	ConnTypeDBMS          = "dbms"
 )
 
+// The cm-honeybee source group types this package accepts, spelled as honeybee
+// stores them. They are the data-migration groups: one collected domain each,
+// and a connection shape to match.
+//
+// honeybee's other types are rejected on purpose. "onprem" and "csp" are
+// infrastructure groups - honeybee itself answers 400 when asked to inspect a
+// filesystem, a bucket or a database through them - so there is no collected
+// data behind such a connection to migrate. A "csp" connection additionally
+// carries no object storage credentials at all (they live on the group, in
+// OpenBao), so the fields this package reads would come back empty.
+const (
+	sourceGroupTypeFS    = "fs"
+	sourceGroupTypeDB    = "db"
+	sourceGroupTypeMinIO = "minio"
+)
+
 // HoneybeeConnConfig is the normalised connection config derived from a
 // honeybee ConnectionInfo response. Only the fields relevant to ConnType are
 // populated; callers should switch on ConnType before reading credentials.
@@ -99,10 +115,6 @@ type honeybeeConnectionInfo struct {
 	Password   string `json:"password,omitempty"`
 	PrivateKey string `json:"private_key,omitempty"`
 
-	// CSP fields
-	ResourceType string `json:"resource_type,omitempty"`
-	ResourceID   string `json:"resource_id,omitempty"`
-
 	// DB fields
 	DBType           string `json:"db_type,omitempty"`
 	DBAccessType     string `json:"db_access_type,omitempty"` // "direct" | "ssh-tunnel"
@@ -129,9 +141,10 @@ type honeybeeConnectionInfo struct {
 }
 
 // honeybeeSourceGroup is the part of GET /honeybee/source_group/{sgId} this
-// package reads: the two fields that decide how an object storage bucket is
-// addressed.
+// package reads: the type that says what kind of source the connection is, and
+// the two fields that decide how an object storage bucket is addressed.
 type honeybeeSourceGroup struct {
+	Type         string `json:"type,omitempty"`
 	ProviderName string `json:"provider_name,omitempty"`
 	RegionName   string `json:"region_name,omitempty"`
 }
@@ -162,13 +175,20 @@ func getJSON(url string, out any) error {
 // GetConnectionInfo calls the honeybee connection_info API for the given ref,
 // decrypts RSA-OAEP/SHA-512 encrypted fields, and returns a HoneybeeConnConfig.
 //
-// An object storage connection costs a second call, for the source group that
-// holds its provider. See the ProviderName field: honeybee resolves a bucket's
-// address from the provider and hands none of that back, so the provider is
-// fetched and the same table is run on this side.
+// Every connection costs two calls: the connection, then the source group it
+// names. The group is what says which kind of source this is, and the kind has
+// to be known before the connection's fields can be read as anything. The
+// connection is fetched by id alone, so its group is only known from the reply -
+// the two calls cannot be made at once.
+//
+// An object storage connection reads two more fields from that same group. See
+// the ProviderName field: honeybee resolves a bucket's address from the provider
+// and hands none of that back, so the provider is fetched and the same table is
+// run on this side.
 //
 // Errors:
 //   - honeybee unreachable or non-200 response → wrapped error (caller returns 500)
+//   - source group type other than fs/db/minio → error naming the type
 //   - RSA decryption failure                   → wrapped error (caller returns 500)
 func GetConnectionInfo(ref commonmodel.HoneybeeRef) (*HoneybeeConnConfig, error) {
 	endpoint := strings.TrimRight(config.Conf.Honeybee.Endpoint, "/")
@@ -178,7 +198,15 @@ func GetConnectionInfo(ref commonmodel.HoneybeeRef) (*HoneybeeConnConfig, error)
 		return nil, err
 	}
 
-	cfg, err := mapToConfig(&raw)
+	if raw.SourceGroupID == "" {
+		return nil, fmt.Errorf("honeybee connection %s names no source group, so its kind cannot be determined", ref.ConnectionID)
+	}
+	var sg honeybeeSourceGroup
+	if err := getJSON(fmt.Sprintf("%s/honeybee/source_group/%s", endpoint, raw.SourceGroupID), &sg); err != nil {
+		return nil, fmt.Errorf("get source group %s of honeybee connection %s: %w", raw.SourceGroupID, ref.ConnectionID, err)
+	}
+
+	cfg, err := mapToConfig(&raw, &sg, ref.ConnectionID)
 	if err != nil {
 		return nil, err
 	}
@@ -189,13 +217,6 @@ func GetConnectionInfo(ref commonmodel.HoneybeeRef) (*HoneybeeConnConfig, error)
 	// Always required, even when the connection states an endpoint of its own:
 	// the provider still decides the bucket addressing style, and a Tencent
 	// bucket reached with the wrong one fails after the endpoint resolved fine.
-	if raw.SourceGroupID == "" {
-		return nil, fmt.Errorf("object storage connection %s names no source group, so its provider cannot be resolved", ref.ConnectionID)
-	}
-	var sg honeybeeSourceGroup
-	if err := getJSON(fmt.Sprintf("%s/honeybee/source_group/%s", endpoint, raw.SourceGroupID), &sg); err != nil {
-		return nil, fmt.Errorf("get source group %s of object storage connection %s: %w", raw.SourceGroupID, ref.ConnectionID, err)
-	}
 	cfg.ProviderName = sg.ProviderName
 	cfg.Region = sg.RegionName
 	return cfg, nil
@@ -203,53 +224,38 @@ func GetConnectionInfo(ref commonmodel.HoneybeeRef) (*HoneybeeConnConfig, error)
 
 // mapToConfig converts a raw honeybee response to HoneybeeConnConfig,
 // decrypting sensitive fields along the way.
-func mapToConfig(raw *honeybeeConnectionInfo) (*HoneybeeConnConfig, error) {
+//
+// The source group's type is the only discriminator. The connection's own
+// fields are not consulted to work out its kind: they are a proxy, and a proxy
+// goes wrong silently when its meaning changes upstream. It already did once -
+// resource_type was read as "this is a CSP connection" until honeybee started
+// setting it on on-premise connections too, at which point an on-prem
+// kubernetes connection, which has no SSH host at all, mapped to an SSH config
+// with an empty host and no error.
+func mapToConfig(raw *honeybeeConnectionInfo, sg *honeybeeSourceGroup, connID string) (*HoneybeeConnConfig, error) {
 	cfg := &HoneybeeConnConfig{}
 
-	switch {
-	case raw.ResourceType != "":
-		// CSP type — resource_type discriminates the sub-kind.
-		if raw.ResourceType == "object_storage" {
-			if err := fillObjectStorage(cfg, raw); err != nil {
-				return nil, err
-			}
-		} else {
-			// "vm" | "k8s" — SSH credentials are stored in the SSH fields.
-			if err := fillSSH(cfg, raw); err != nil {
-				return nil, err
-			}
-		}
-
-	case raw.OSEndpoint != "", raw.OSAccessKeyId != "":
-		// MinIO / S3-compatible (SourceGroup.Type = "minio").
-		// Checked before ip_address because SSH-tunnel MinIO connections carry
-		// both ip_address (tunnel host) and os_endpoint; os_endpoint wins.
-		//
-		// os_access_key_id is the second marker because os_endpoint is OPTIONAL
-		// for every provider whose host honeybee builds itself — aws, ncp and the
-		// rest of its provider table only need a region. Keying on the endpoint
-		// alone recognised nothing but the onprem and openstack shapes, where the
-		// caller supplies the host, and answered everything else with "cannot
-		// determine connection type".
-		if err := fillObjectStorage(cfg, raw); err != nil {
-			return nil, err
-		}
-
-	case raw.DBType != "":
-		// Direct DBMS or SSH-tunnel DBMS (SourceGroup.Type = "db").
-		// Checked before ip_address for the same reason as OSEndpoint above.
-		if err := fillDBMS(cfg, raw); err != nil {
-			return nil, err
-		}
-
-	case raw.IPAddress != "":
-		// Pure SSH connection (SourceGroup.Type = "ssh")
+	switch sg.Type {
+	case sourceGroupTypeFS:
 		if err := fillSSH(cfg, raw); err != nil {
 			return nil, err
 		}
 
+	case sourceGroupTypeDB:
+		if err := fillDBMS(cfg, raw); err != nil {
+			return nil, err
+		}
+
+	case sourceGroupTypeMinIO:
+		if err := fillObjectStorage(cfg, raw); err != nil {
+			return nil, err
+		}
+
 	default:
-		return nil, fmt.Errorf("cannot determine connection type from honeybee response")
+		return nil, fmt.Errorf(
+			"honeybee connection %s belongs to a %q source group; "+
+				"centipede migrates data only from %q, %q or %q groups",
+			connID, sg.Type, sourceGroupTypeFS, sourceGroupTypeDB, sourceGroupTypeMinIO)
 	}
 
 	return cfg, nil

@@ -29,12 +29,14 @@ const defaultObjectConcurrency = 4
 // them: os_endpoint is optional for every provider whose host it builds itself,
 // there is no field for the bucket addressing style at all, and os_use_ssl is
 // the caller's wish rather than what the provider imposed. Reading the fields
-// alone therefore produced an empty endpoint for any CSP bucket — and, for
-// Tencent, an endpoint that resolved and a bucket that could not be addressed.
+// alone therefore produced an empty endpoint for every provider that needs none
+// typed in — and, for Tencent, an endpoint that resolved and a bucket that could
+// not be addressed.
 //
 // The provider comes from the connection's source group; see
-// honeybee.GetConnectionInfo. Without one — a connection registered before this
-// existed — the caller's own endpoint is used as before.
+// honeybee.GetConnectionInfo. A minio group must name one, so the empty case is
+// a group registered before that was required: there the caller's own endpoint
+// is used as before.
 func ToMinioS3Config(cfg honeybee.HoneybeeConnConfig) (*transxex.S3MinioConfig, error) {
 	if strings.TrimSpace(cfg.ProviderName) == "" {
 		endpoint := cfg.Endpoint
