@@ -11,15 +11,21 @@
 # object storage one, and everything else in this folder follows from it.
 #
 # honeybee does not read a remote filesystem itself. doImportFS refuses any
-# source group that is not type "ssh" — "filesystem inspection is supported only
-# for ssh source group" — and then reaches the data by running
+# source group that is not type "fs" — "filesystem inspection is supported only
+# for fs source group" — and then reaches the data by running
 # `curl localhost:8082/honeybee-agent/fs?...` INSIDE the source host over SSH
 # (lib/ssh/ssh.go SendGetRequestToAgent). The agent has to be there first.
 #
-# Nothing here installs it. Registering an ssh connection does:
+# Nothing here installs it. Registering the connection does:
 # doGetConnectionInfo(id, refresh=true) calls ssh.RunAgent, and refresh is true
 # on create (POST), on update (PUT) and on the explicit refresh endpoint. So
 # hb_connection below — a plain POST-or-PUT — is also the install step.
+#
+# ⚠ doGetConnectionInfo switches on the group type and has no "fs" arm, so an fs
+#   connection falls to the default — the same one an on-prem VM takes,
+#   NewClientConn followed by RunAgent. The k8s escape at the top of that arm
+#   cannot catch it either: an fs group takes no resource_type, so the field is
+#   empty.
 #
 # What that costs is worth knowing before reading a slow run:
 #   - RunAgent SFTPs busybox and copyAgent.sh in, runs the script under sudo,
@@ -102,26 +108,39 @@ hb_preflight() {
 
 # hb_source_group NAME -> id (created when absent)
 #
-#   Type "ssh" is not a choice. doImportFS rejects every other type by name, and
-#   it is also what makes the default branch of doGetConnectionInfo — the one
-#   that installs the agent — the branch a registration takes.
+#   Type "fs" is not a choice. doImportFS rejects every other type by name.
+#   It is the data-side counterpart of "onprem": the group says what is
+#   collected from the host, not how the host is reached.
+#
+#   ⚠ A group found by name is reused as it is, so one carrying another type
+#     would be picked up here and only rejected at the inspect, several minutes
+#     and one agent install later. The type is checked rather than trusted.
 hb_source_group() {
-	local name="$1" id tmp body
+	local name="$1" id tmp body found
 	tmp="$(mktemp)"
 	hb_curl GET "/source_group" "" "$tmp" >/dev/null
 	id="$(jq -r --arg n "$name" '.source_group[]? | select(.name==$n) | .id' "$tmp" 2>/dev/null | head -1)"
-	if [ -n "$id" ] && [ "$id" != "null" ]; then rm -f "$tmp"; printf '%s' "$id"; return 0; fi
+	if [ -n "$id" ] && [ "$id" != "null" ]; then
+		found="$(jq -r --arg n "$name" '.source_group[]? | select(.name==$n) | .type' "$tmp" 2>/dev/null | head -1)"
+		rm -f "$tmp"
+		if [ "$found" != "fs" ]; then
+			fail "the honeybee SourceGroup \"$name\" is type \"$found\", not \"fs\"."
+			fail "  A filesystem inspect is refused for any other type."
+			fail "  Delete it, or point HB_SOURCE_GROUP at another name:"
+			fail "    curl -s -X DELETE $HB_BASE/source_group/$id"
+			return 1
+		fi
+		printf '%s' "$id"
+		return 0
+	fi
 
 	body="$(jq -cn --arg n "$name" --arg d "cm-centipede filesystem migration matrix" \
-		'{name:$n, description:$d, type:"ssh"}')"
+		'{name:$n, description:$d, type:"fs"}')"
 	hb_curl POST "/source_group" "$body" "$tmp" >/dev/null
 	id="$(jq -r '.id // empty' "$tmp" 2>/dev/null)"
 	rm -f "$tmp"
 	if [ -z "$id" ]; then
 		fail "could not create the honeybee SourceGroup: $name"
-		fail "  It must be type \"ssh\"; a group of another type already registered under"
-		fail "  this name would be refused. Rename it with HB_SOURCE_GROUP, or delete the"
-		fail "  old one."
 		return 1
 	fi
 	printf '%s' "$id"

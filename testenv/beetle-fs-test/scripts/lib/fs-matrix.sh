@@ -563,7 +563,7 @@ matrix_main() {
 	sub "4) collecting the source — cm-honeybee (once for the whole run)"
 	HB_SG_ID="$(hb_source_group "${HB_SOURCE_GROUP:-cpbfs-matrix}")" \
 		|| die "could not obtain the honeybee SourceGroup. Nothing was created."
-	info "honeybee SourceGroup: ${HB_SOURCE_GROUP:-cpbfs-matrix} ($HB_SG_ID)  type=ssh"
+	info "honeybee SourceGroup: ${HB_SOURCE_GROUP:-cpbfs-matrix} ($HB_SG_ID)  type=fs"
 
 	# Not a command substitution: hb_connection reports through globals, and a
 	# subshell would swallow the four status variables hb_assert_connection reads.

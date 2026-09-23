@@ -137,13 +137,13 @@ curl -s -X POST http://localhost:8081/honeybee/source_group \
   -d '{
         "name": "onprem-to-aws-fs",
         "description": "on-premises filesystem source",
-        "type": "ssh"
+        "type": "fs"
       }'
 ```
 
 Take **`.id`** from the response — that is the `sgId` below.
 
-> **`"type":"ssh"` is not a choice.** A filesystem inspect is refused for a source
+> **`"type":"fs"` is not a choice.** A filesystem inspect is refused for a source
 > group of any other type.
 
 ```bash

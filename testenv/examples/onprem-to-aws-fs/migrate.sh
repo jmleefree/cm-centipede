@@ -50,7 +50,7 @@ POLL=${POLL:-5}
 # =============================================================================
 # 1. Register the source group with cm-honeybee
 # =============================================================================
-# Type "ssh" is not a choice: a filesystem inspect is refused for a source group
+# Type "fs" is not a choice: a filesystem inspect is refused for a source group
 # of any other type.
 
 echo "==> 1/6  Registering the source group"
@@ -60,7 +60,7 @@ RESPONSE=$(curl -s -X POST "$HB_BASE/source_group" \
   -d "{
         \"name\": \"$NAME\",
         \"description\": \"on-premises filesystem source\",
-        \"type\": \"ssh\"
+        \"type\": \"fs\"
       }")
 
 echo "$RESPONSE"
