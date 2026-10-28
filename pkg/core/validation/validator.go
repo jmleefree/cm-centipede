@@ -3,6 +3,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -994,14 +995,15 @@ func compareSchemaObjects(src, dst *transxex.DBMSInfo, rules []commonmodel.DBMSF
 			continue // not collected on either side
 		}
 
+		// Matched on schemaObjectKey, reported under the name each server gave.
 		dstSet := make(map[string]bool, len(dstList))
 		for _, n := range dstList {
-			dstSet[n] = true
+			dstSet[schemaObjectKey(kind, n)] = true
 		}
 		srcSet := make(map[string]bool, len(srcList))
 		for _, n := range srcList {
-			srcSet[n] = true
-			if dstSet[n] || excluded[kind+":"+n] {
+			srcSet[schemaObjectKey(kind, n)] = true
+			if dstSet[schemaObjectKey(kind, n)] || excluded[kind+":"+n] {
 				continue
 			}
 			details = append(details, model.ValidationDetailItem{
@@ -1011,7 +1013,7 @@ func compareSchemaObjects(src, dst *transxex.DBMSInfo, rules []commonmodel.DBMSF
 			})
 		}
 		for _, n := range dstList {
-			if srcSet[n] {
+			if srcSet[schemaObjectKey(kind, n)] {
 				continue
 			}
 			details = append(details, model.ValidationDetailItem{
@@ -1022,6 +1024,32 @@ func compareSchemaObjects(src, dst *transxex.DBMSInfo, rules []commonmodel.DBMSF
 		}
 	}
 	return details
+}
+
+// routineArgModeIN matches an explicit IN mode at the start of a routine
+// argument: right after the opening parenthesis or after ", ".
+var routineArgModeIN = regexp.MustCompile(`(\(|, )IN `)
+
+// schemaObjectKey is the form a schema object name is compared in.
+//
+// It differs from the name only for PostgreSQL routines. Their names carry the
+// identity signature (pg_get_function_identity_arguments), and from PostgreSQL
+// 14 the server writes the IN mode into a procedure's signature, where 13 and
+// earlier leave it out:
+//
+//	13:  public.sp_x(p_id integer, INOUT p_out integer)
+//	14+: public.sp_x(IN p_id integer, INOUT p_out integer)
+//
+// Both name the same procedure, so a 13 → 14 migration would otherwise report
+// every procedure as missing on the target and again as extra there. IN is the
+// default mode, so dropping it changes nothing about which routine is meant;
+// INOUT, OUT and VARIADIC are kept. A MySQL/MariaDB routine name carries no
+// argument list and passes through unchanged.
+func schemaObjectKey(kind, name string) string {
+	if kind != "function" && kind != "procedure" {
+		return name
+	}
+	return routineArgModeIN.ReplaceAllString(name, "$1")
 }
 
 // excludedObjects indexes the object_exclude rules as "kind:name", so a
