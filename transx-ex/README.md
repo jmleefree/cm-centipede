@@ -162,6 +162,22 @@ suffix (`blob.core.windows.net` and its China/US-Gov counterparts). The config
 block is unchanged — `accessKeyId` is read as the storage account name and
 `secretAccessKey` as the account key.
 
+Objects above 128 MiB go to S3-compatible stores and Azure in parts rather
+than one presigned PUT: S3 multipart uploads through minio-go, staged blocks
+through azblob. That lifts the 5 GiB (S3) and 5000 MiB (Azure Put Blob) caps,
+and a part that fails is sent again on its own, not the whole object. From
+object storage each part is a ranged GET of the source. An object written in
+parts has a `<md5>-N` ETag, which describes the upload rather than the content.
+
+Access types `spider` and `tumblebug` write each object in one presigned PUT —
+neither hands out a URL for a part — so an object larger than the cloud behind
+them takes in one request cannot be written that way. A pipeline to either
+lists its source first and fails with nothing sent when any file or object is
+over that limit, naming them. The limit is the cloud's own, read from the
+connection (cb-spider) or the bucket (cb-tumblebug): 5000 MiB on Azure, 5 TiB
+on GCP, 10 TB on NCP, and 5 GiB on every other cloud or when the cloud cannot
+be read. Only the files the filter lets through are weighed.
+
 ### Database routing
 
 | Source / Destination access     | Pipeline           | How                                       |
@@ -330,6 +346,8 @@ Which field carries the qualifier depends on the rule:
 | `object_exclude`, `kind: "index"` | `table` | `{"type":"object_exclude","kind":"index","table":"sales.orders","name":"idx_created"}` |
 
 An index rule is the odd one because an index name is unique per table rather than per schema: the qualifier pins the table, and `name` stays bare.
+
+A PostgreSQL function or procedure rule may also carry the signature `Inspect` lists it with, `sales.user_count(integer, text)`. That form takes the one overload it names, while `name` and `schema.name` take every overload. The arguments are compared without the `IN` mode PostgreSQL 14 began to print, and spacing does not matter. `ObjectRuleMatches` answers, for a name as `Inspect` lists it, whether a rule takes that object, so a caller can check before a migration that each rule names something.
 
 ```go
 json.Unmarshal([]byte(`{"rules":[
@@ -504,6 +522,8 @@ json.Unmarshal([]byte(`{"rules":[
 ]}`), &f)
 loc.Filter = &f
 ```
+
+`InspectDBMS` honours the same filter: with `loc.Filter` set, its schema-object lists (foreign keys, views, routines, triggers, events, sequences, types, extensions, rules, validators) name what the filtered dump writes — including what a rule removes without naming it, such as the foreign keys and triggers of an excluded table. Inspecting the source through the migration's filter therefore gives the list a restored target should hold. The table list is left whole, and with no filter every list is the full one.
 
 Both registries accept new matcher types — `filter.Register` for storage, `filter.RegisterFilter` for databases — so rules extend without changing the library.
 
