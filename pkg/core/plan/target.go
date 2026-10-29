@@ -523,6 +523,88 @@ func validatePgSchemas(dbType, database string, pairs []commonmodel.PgSchemaMapp
 	return nil
 }
 
+// validateObjectRules rejects an object_exclude rule that names no object of its
+// kind in the source database. Such a rule is not an error to the migration — it
+// simply removes nothing — so without this check a misspelt name, a wrong schema
+// or a name in a form the engine does not take would migrate the object the
+// caller meant to leave out, and say nothing.
+//
+// A name is matched the way the engine's dump matches it
+// (transxex.ObjectRuleMatches). A kind whose inventory the source model does not
+// carry is not checked: honeybee collects the inventory only on request, and an
+// absent list says nothing about what the database holds.
+func validateObjectRules(dbType string, info sourcemodel.DBMSInfo, rules []commonmodel.DBMSFilterRule) error {
+	lists := map[string][]string{
+		"view":              info.Views,
+		"function":          info.Functions,
+		"procedure":         info.Procedures,
+		"trigger":           info.Triggers,
+		"event":             info.Events,
+		"foreign_key":       info.ForeignKeys,
+		"materialized_view": info.MaterializedViews,
+		"sequence":          info.Sequences,
+		"type":              info.Types,
+		"extension":         info.Extensions,
+		"rule":              info.Rules,
+		"validator":         info.Validators,
+	}
+	for _, r := range rules {
+		if r.Type != commonmodel.DBMSRuleObjectExclude || r.Name == "" {
+			continue
+		}
+		if r.Kind == "index" {
+			if found, collected := sourceHasIndex(info, r.Table, r.Name); collected && !found {
+				return validationErr("object_exclude index %q%s matches no index in database %q",
+					r.Name, onTable(r.Table), info.Database)
+			}
+			continue
+		}
+		names, ok := lists[r.Kind]
+		if !ok || names == nil {
+			continue
+		}
+		matched := false
+		for _, n := range names {
+			if transxex.ObjectRuleMatches(dbType, r.Kind, r.Name, n) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return validationErr("object_exclude %s %q matches no %s in database %q",
+				r.Kind, r.Name, r.Kind, info.Database)
+		}
+	}
+	return nil
+}
+
+// sourceHasIndex reports whether a table of info (table, when it is given, by
+// its bare or schema-qualified name) holds an index named name. collected is
+// false when no table carries an index list.
+func sourceHasIndex(info sourcemodel.DBMSInfo, table, name string) (found, collected bool) {
+	for _, t := range info.Tables {
+		if t.Indexes != nil {
+			collected = true
+		}
+		if table != "" && table != t.Name && table != t.PgSchema+"."+t.Name {
+			continue
+		}
+		for _, idx := range t.Indexes {
+			if idx.Name == name {
+				return true, true
+			}
+		}
+	}
+	return false, collected
+}
+
+func onTable(table string) string {
+	if table == "" {
+		return ""
+	}
+	return fmt.Sprintf(" on table %q", table)
+}
+
 // sourceEntry is one entry of the request's source model, found by the honeybee
 // connection id that produced it. Exactly one of the three pointers is non-nil,
 // and kind says which.
@@ -802,7 +884,15 @@ func buildDBEntry(
 			"no database selected for migration; dbmsFilter.databases names none of this source's databases")
 	}
 
+	infos := make(map[string]sourcemodel.DBMSInfo, len(srcDB.Databases))
+	for _, info := range srcDB.Databases {
+		infos[info.Database] = info
+	}
+
 	for _, it := range items {
+		if err := validateObjectRules(dbType, infos[it.SrcName], it.Rules); err != nil {
+			return targetmodel.MigrationDBModel{}, err
+		}
 		if err := validateDBMSVersion(srcDB.Connection, e.DstConnection, it.SrcName, dbType); err != nil {
 			return targetmodel.MigrationDBModel{}, err
 		}
