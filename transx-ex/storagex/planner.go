@@ -161,8 +161,9 @@ func planObjectStorageTransfer(model DataMigrationModel) (*Pipeline, error) {
 	return &Pipeline{
 		Name: PipelineObjectStorageTransfer,
 		// What was resolved, not what was asked: auto and unset both end here.
-		Strategy: StrategyDirect,
-		Cleanup:  withProviders(nil, srcProvider, dstProvider),
+		Strategy:  StrategyDirect,
+		Cleanup:   withProviders(nil, srcProvider, dstProvider),
+		Preflight: singlePutPreflight(dstProvider, "object", objectSizes(model.Source, srcProvider)),
 		Steps: []Step{
 			{
 				Name:        StepStreamS3ToS3,
@@ -203,6 +204,8 @@ func planRelayObjectStorageTransfer(model DataMigrationModel) (*Pipeline, error)
 		Name:     PipelineObjectStorageTransfer,
 		Strategy: model.Strategy,
 		Cleanup:  withProviders(cleanup, srcProvider, dstProvider),
+		// The source bucket's listing, before anything is downloaded to staging.
+		Preflight: singlePutPreflight(dstProvider, "object", objectSizes(model.Source, srcProvider)),
 		Steps: []Step{
 			{
 				Name:        StepDownloadFromS3,
@@ -246,13 +249,16 @@ func planFilesystemToObjectStorage(model DataMigrationModel) (*Pipeline, error) 
 		return nil, fmt.Errorf("failed to create S3 provider: %w", err)
 	}
 	s3Exec := NewS3Executor(s3Provider)
+	// The source itself is listed, on a relay too: before rsync copies anything.
+	preflight := singlePutPreflight(s3Provider, "file", fsSizes(model.Source))
 
 	// Direct transfer if source is local filesystem
 	if model.Source.IsLocal() {
 		return &Pipeline{
-			Name:     PipelineCrossStorageTransfer,
-			Strategy: model.Strategy,
-			Cleanup:  withProviders(nil, s3Provider),
+			Name:      PipelineCrossStorageTransfer,
+			Strategy:  model.Strategy,
+			Cleanup:   withProviders(nil, s3Provider),
+			Preflight: preflight,
 			Steps: []Step{
 				{
 					Name:        StepUploadToS3,
@@ -278,9 +284,10 @@ func planFilesystemToObjectStorage(model DataMigrationModel) (*Pipeline, error) 
 	}
 
 	return &Pipeline{
-		Name:     PipelineCrossStorageTransfer,
-		Strategy: model.Strategy,
-		Cleanup:  withProviders(cleanup, s3Provider),
+		Name:      PipelineCrossStorageTransfer,
+		Strategy:  model.Strategy,
+		Cleanup:   withProviders(cleanup, s3Provider),
+		Preflight: preflight,
 		Steps: []Step{
 			{
 				Name:        StepRsyncFromServer,

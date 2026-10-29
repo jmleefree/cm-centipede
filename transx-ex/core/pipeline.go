@@ -47,11 +47,18 @@ type Step[L any] struct {
 // there is no other moment at which "nobody will run this" becomes known. That
 // leaves an empty directory rather than a populated one, which is the difference
 // between untidy and wrong.
+//
+// Preflight checks, before the first step, what the planner could not check
+// without I/O — that every object fits the destination, say. A planner has no
+// context to do I/O under, so it leaves the check here for Execute to run. It is
+// not a step: it moves nothing, and a pipeline reports the same step count with
+// it as without. It is nil for a pipeline with nothing to check.
 type Pipeline[L any] struct {
-	Name     string
-	Strategy string
-	Steps    []Step[L]
-	Cleanup  func()
+	Name      string
+	Strategy  string
+	Steps     []Step[L]
+	Cleanup   func()
+	Preflight func(ctx context.Context) error
 }
 
 // Execute runs each Step in order, stopping at the first failure. The step's
@@ -67,6 +74,13 @@ func (p *Pipeline[L]) Execute(ctx context.Context) error {
 	// most harm, since it is what a later transfer would otherwise pick up.
 	if p.Cleanup != nil {
 		defer p.Cleanup()
+	}
+
+	// Before any step, so a transfer that cannot finish fails with nothing sent.
+	if p.Preflight != nil {
+		if err := p.Preflight(ctx); err != nil {
+			return fmt.Errorf("preflight failed: %w", err)
+		}
 	}
 
 	for i, step := range p.Steps {

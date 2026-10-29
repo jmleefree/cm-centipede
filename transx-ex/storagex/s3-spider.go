@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,6 +22,11 @@ type SpiderProvider struct {
 	username       string
 	password       string
 	jwtToken       string
+
+	// The single-PUT limit of the cloud behind the connection, read once.
+	limitOnce sync.Once
+	limit     int64
+	csp       string // "" when it could not be read
 }
 
 // NewSpiderProvider creates a new SpiderProvider.
@@ -171,6 +177,70 @@ func (p *SpiderProvider) ListObjects(prefix string) ([]ObjectInfo, error) {
 // GetBucket returns the bucket name.
 func (p *SpiderProvider) GetBucket() string {
 	return p.bucket
+}
+
+// singlePutLimit is the largest object this bucket takes in one presigned PUT:
+// the limit of the cloud behind the connection, or presignedPutLimit when that
+// cannot be read. cb-spider hands out no presigned URL for a part, so nothing
+// larger can be written this way.
+func (p *SpiderProvider) singlePutLimit() int64 {
+	p.limitOnce.Do(func() {
+		p.limit = presignedPutLimit
+		if csp, err := p.cloudProvider(); err == nil {
+			p.csp, p.limit = csp, putLimitFor(csp)
+		}
+	})
+	return p.limit
+}
+
+// limitSource names the cloud singlePutLimit took its limit from.
+func (p *SpiderProvider) limitSource() string {
+	p.singlePutLimit()
+	return limitSourceOf("spider", p.csp)
+}
+
+// cloudProvider reads the provider of the connection,
+// GET /connectionconfig/{ConnectionName} → ProviderName ("AWS", "AZURE", …).
+func (p *SpiderProvider) cloudProvider() (string, error) {
+	apiURL := fmt.Sprintf("%s/connectionconfig/%s", p.endpoint, url.PathEscape(p.connectionName))
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if p.username != "" && p.password != "" {
+		req.SetBasicAuth(p.username, p.password)
+	} else if p.jwtToken != "" {
+		req.Header.Set("Authorization", "Bearer "+p.jwtToken)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("spider API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("spider API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var response spiderConnectionConfigResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+	if response.ProviderName == "" {
+		return "", fmt.Errorf("connection config %q names no provider", p.connectionName)
+	}
+	return response.ProviderName, nil
+}
+
+// spiderConnectionConfigResponse mirrors the field cloudProvider reads from
+// GET /connectionconfig/{ConfigName} (Spider's ConnectionConfigInfo).
+type spiderConnectionConfigResponse struct {
+	ProviderName string `json:"ProviderName"`
 }
 
 // spiderListResponse represents CB-Spider's S3 list bucket response (XML format).

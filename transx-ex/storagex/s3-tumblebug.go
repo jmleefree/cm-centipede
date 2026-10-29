@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,11 @@ type TumblebugProvider struct {
 	username string
 	password string
 	jwtToken string
+
+	// The single-PUT limit of the cloud behind the bucket, read once.
+	limitOnce sync.Once
+	limit     int64
+	csp       string // "" when it could not be read
 }
 
 // NewTumblebugProvider creates a new TumblebugProvider.
@@ -176,6 +182,72 @@ func (p *TumblebugProvider) GetBucket() string {
 	return p.osId
 }
 
+// singlePutLimit is the largest object this bucket takes in one presigned PUT:
+// the limit of the cloud cb-tumblebug placed it on, or presignedPutLimit when
+// that cannot be read. cb-tumblebug hands out no URL for a part, so nothing
+// larger can be written.
+func (p *TumblebugProvider) singlePutLimit() int64 {
+	p.limitOnce.Do(func() {
+		p.limit = presignedPutLimit
+		if csp, err := p.cloudProvider(); err == nil {
+			p.csp, p.limit = csp, putLimitFor(csp)
+		}
+	})
+	return p.limit
+}
+
+// limitSource names the cloud singlePutLimit took its limit from.
+func (p *TumblebugProvider) limitSource() string {
+	p.singlePutLimit()
+	return limitSourceOf("tumblebug", p.csp)
+}
+
+// cloudProvider reads the provider of the bucket's connection from
+// cb-tumblebug's own store, which answers without asking cb-spider:
+// GET /ns/{nsId}/resources/objectStorage?filterKey=id&filterVal={osId}.
+//
+// Not GET /ns/{nsId}/resources/objectStorage/{osId}: that one lists the whole
+// bucket through cb-spider on every call, and has no option to leave it out.
+// The filter is a substring match over each entry's JSON, so the entry whose id
+// is osId is picked from what comes back.
+func (p *TumblebugProvider) cloudProvider() (string, error) {
+	apiURL := fmt.Sprintf("%s/ns/%s/resources/objectStorage?filterKey=id&filterVal=%s",
+		p.endpoint, p.nsId, url.QueryEscape(p.osId))
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	if p.username != "" && p.password != "" {
+		req.SetBasicAuth(p.username, p.password)
+	} else if p.jwtToken != "" {
+		req.Header.Set("Authorization", "Bearer "+p.jwtToken)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("tumblebug API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("tumblebug API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var response tumblebugObjectStorageListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+	for _, entry := range response.ObjectStorage {
+		if entry.Id == p.osId && entry.ConnectionConfig.ProviderName != "" {
+			return entry.ConnectionConfig.ProviderName, nil
+		}
+	}
+	return "", fmt.Errorf("object storage %q not found in namespace %q", p.osId, p.nsId)
+}
+
 // Response types for Tumblebug API
 // Based on: POST /ns/{nsId}/resources/objectStorage/{osId}/object/{objectKey}/presignedUrl
 // Mirrors Tumblebug's ObjectStoragePresignedUrlResponse.
@@ -188,6 +260,17 @@ type tumblebugPresignedURLResponse struct {
 
 type tumblebugListResponse struct {
 	Contents []tumblebugObjectEntry `json:"contents"`
+}
+
+// tumblebugObjectStorageListResponse mirrors the fields cloudProvider reads from
+// GET /ns/{nsId}/resources/objectStorage (Tumblebug's ObjectStorageListResponse).
+type tumblebugObjectStorageListResponse struct {
+	ObjectStorage []struct {
+		Id               string `json:"id"`
+		ConnectionConfig struct {
+			ProviderName string `json:"providerName"`
+		} `json:"connectionConfig"`
+	} `json:"objectStorage"`
 }
 
 type tumblebugObjectEntry struct {
