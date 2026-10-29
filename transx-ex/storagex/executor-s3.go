@@ -98,19 +98,35 @@ func (e *S3Executor) upload(ctx context.Context, localPath, s3Path string, flt *
 		s3Key := filepath.Join(keyPrefix, relPath)
 		s3Key = strings.ReplaceAll(s3Key, "\\", "/") // Normalize to forward slashes
 
-		if err := withRetry(ctx, func() error { return e.uploadFile(ctx, file, s3Key) }); err != nil {
+		// The size decides the route: an object above what the provider sends
+		// in one PUT goes in parts, where it can.
+		var size int64
+		if info, statErr := os.Stat(file); statErr == nil {
+			size = info.Size()
+		}
+
+		if mp, ok := e.Provider.(multipartUploader); ok && size > mp.singlePutLimit() {
+			// Counted part by part as they land, then finished at the size.
+			var credited int64
+			err = e.uploadFileMultipart(ctx, mp, file, s3Key, size, func(written int64) {
+				progress.credit(&credited, written, s3Key)
+			})
+			if err == nil {
+				progress.finish(&credited, size, s3Key)
+			}
+		} else {
+			err = withRetry(ctx, func() error { return e.uploadFile(ctx, file, s3Key) })
+			if err == nil {
+				// After the upload, not before: what is reported is what landed.
+				progress.done(size, s3Key)
+			}
+		}
+		if err != nil {
 			if cerr := ctx.Err(); cerr != nil {
 				return cerr
 			}
 			return item.Fail(ActionUpload, err)
 		}
-
-		// After the upload, not before: what is reported is what landed.
-		var size int64
-		if info, statErr := os.Stat(file); statErr == nil {
-			size = info.Size()
-		}
-		progress.done(size, s3Key)
 		return nil
 	})
 }
@@ -226,7 +242,13 @@ func (e *S3Executor) uploadFile(ctx context.Context, localPath, s3Key string) er
 		return permanent(fmt.Errorf("failed to stat file: %w", err))
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, result.URL, file)
+	// A zero ContentLength with a body is sent chunked, which a presigned PUT
+	// refuses (411); an empty file is sent with no body, as copyObject does.
+	var body io.Reader = file
+	if stat.Size() == 0 {
+		body = http.NoBody
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, result.URL, body)
 	if err != nil {
 		return permanent(fmt.Errorf("failed to create request: %w", err))
 	}
@@ -248,6 +270,18 @@ func (e *S3Executor) uploadFile(ctx context.Context, localPath, s3Key string) er
 	}
 
 	return nil
+}
+
+// uploadFileMultipart uploads a single file in parts through mp, each part read
+// from the file at its own offset. done is called as parts land.
+func (e *S3Executor) uploadFileMultipart(ctx context.Context, mp multipartUploader, localPath, s3Key string, size int64, done func(written int64)) error {
+	file, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	return runMultipart(ctx, mp, s3Key, size, sectionOpener(file), done)
 }
 
 // downloadFile downloads a single file using presigned URL.
@@ -341,10 +375,16 @@ func (e *S3StreamExecutor) Execute(ctx context.Context, source, destination Data
 		// Shared by every attempt at this object, so a retry counts only what
 		// goes past the furthest an earlier attempt got.
 		var credited int64
-		copyOnce := func() error {
-			return e.copyObject(ctx, obj, dstKey, func(pos int64) { progress.credit(&credited, pos, obj.Key) })
+		read := func(pos int64) { progress.credit(&credited, pos, obj.Key) }
+
+		var err error
+		if mp, ok := e.Dst.(multipartUploader); ok && obj.Size > mp.singlePutLimit() {
+			// Retried part by part inside, so not wrapped in withRetry.
+			err = e.copyObjectMultipart(ctx, mp, obj, dstKey, read)
+		} else {
+			err = withRetry(ctx, func() error { return e.copyObject(ctx, obj, dstKey, read) })
 		}
-		if err := withRetry(ctx, copyOnce); err != nil {
+		if err != nil {
 			if cerr := ctx.Err(); cerr != nil {
 				return cerr
 			}
@@ -418,6 +458,47 @@ func (e *S3StreamExecutor) copyObject(ctx context.Context, obj ObjectInfo, dstKe
 		return statusError("upload", putResp)
 	}
 	return nil
+}
+
+// copyObjectMultipart streams one object from Src to Dst in parts: each part is
+// a ranged GET of the source, written as it arrives. A retry fetches that part
+// again, not the object. written is called as parts land.
+//
+// The size is the listing's. An object that changed size since it was listed
+// fails a range, rather than landing short or long.
+func (e *S3StreamExecutor) copyObjectMultipart(ctx context.Context, mp multipartUploader, obj ObjectInfo, dstKey string, written func(int64)) error {
+	open := func(off, n int64) (io.ReadCloser, error) {
+		// A fresh URL each attempt: an upload of many parts can outlast one.
+		get, err := e.Src.GeneratePresignedURL("download", obj.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate presigned download URL: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, get.URL, nil)
+		if err != nil {
+			return nil, permanent(fmt.Errorf("failed to create download request: %w", err))
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, off+n-1))
+
+		resp, err := httpClientFor(e.Src).Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("download request failed: %w", err)
+		}
+		if resp.StatusCode != http.StatusPartialContent {
+			defer resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				// 200 is the whole object: the source ignored the range, and
+				// would do so on every attempt.
+				return nil, permanent(fmt.Errorf("source answered a range request with status %d", resp.StatusCode))
+			}
+			return nil, statusError("download", resp)
+		}
+		if resp.ContentLength >= 0 && resp.ContentLength != n {
+			resp.Body.Close()
+			return nil, fmt.Errorf("range of %d bytes at %d came back with %d", n, off, resp.ContentLength)
+		}
+		return resp.Body, nil
+	}
+	return runMultipart(ctx, mp, dstKey, obj.Size, open, written)
 }
 
 // streamDstKey maps a source key to its destination key: the part below the

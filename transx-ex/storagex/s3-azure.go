@@ -1,15 +1,22 @@
 package storagex
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/streaming"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
 )
@@ -258,6 +265,99 @@ func (p *AzureProvider) DownloadFile(key, localPath string) error {
 		return fmt.Errorf("failed to download file: %w", err)
 	}
 	return nil
+}
+
+// ============================================================================
+// Multipart upload — staged blocks
+// ============================================================================
+
+// azureMinBlockSize is the smallest block a staged upload uses. Blocks are
+// grown above it only as far as 50,000 of them need to hold the object. A
+// variable so tests can lower it.
+var azureMinBlockSize int64 = 64 << 20
+
+// singlePutLimit is where the provider switches from one presigned Put Blob to
+// staged blocks. Put Blob itself takes up to 5000 MiB.
+func (p *AzureProvider) singlePutLimit() int64 {
+	return multipartThreshold
+}
+
+// startMultipart opens a staged block upload of size bytes to key. Nothing is
+// created on the service until the first block lands.
+func (p *AzureProvider) startMultipart(_ context.Context, key string, size int64) (multipartUpload, error) {
+	block := max(azureMinBlockSize, (size+blockblob.MaxBlocks-1)/blockblob.MaxBlocks)
+	block = (block + 1<<20 - 1) &^ (1<<20 - 1) // whole MiB
+	if block > blockblob.MaxStageBlockBytes {
+		return nil, permanent(fmt.Errorf("object of %d bytes exceeds %d blocks of %d bytes", size, blockblob.MaxBlocks, int64(blockblob.MaxStageBlockBytes)))
+	}
+	blocks := int((size + block - 1) / block)
+	return &azureUpload{
+		blob:  p.client.ServiceClient().NewContainerClient(p.container).NewBlockBlobClient(key),
+		block: block,
+		ids:   make([]string, blocks),
+	}, nil
+}
+
+// azureUpload is one staged block upload in progress.
+type azureUpload struct {
+	blob  *blockblob.Client
+	block int64
+	ids   []string // block IDs by part number - 1, all the same length
+}
+
+func (u *azureUpload) partSize() int64 { return u.block }
+
+// azureBlockID names part n. Every ID of one blob must be the same length, so
+// the number is zero-padded.
+func azureBlockID(n int) string {
+	return base64.StdEncoding.EncodeToString(fmt.Appendf(nil, "%08d", n))
+}
+
+func (u *azureUpload) uploadPart(ctx context.Context, n int, size int64, r io.Reader) error {
+	// StageBlock needs to seek its body. A file section seeks in place; a
+	// stream is held in memory, one block of it.
+	var body io.ReadSeekCloser
+	if rs, ok := r.(io.ReadSeeker); ok {
+		body = streaming.NopCloser(rs)
+	} else {
+		buf, err := io.ReadAll(io.LimitReader(r, size))
+		if err != nil {
+			return fmt.Errorf("read block %d: %w", n, err)
+		}
+		if int64(len(buf)) != size {
+			return fmt.Errorf("block %d: read %d of %d bytes", n, len(buf), size)
+		}
+		body = streaming.NopCloser(bytes.NewReader(buf))
+	}
+
+	id := azureBlockID(n)
+	if _, err := u.blob.StageBlock(ctx, id, body, nil); err != nil {
+		return azureError(fmt.Errorf("stage block %d: %w", n, err))
+	}
+	u.ids[n-1] = id
+	return nil
+}
+
+// complete commits the blocks in part order. Committing the same list again is
+// harmless, so a retry after a lost response needs no special case.
+func (u *azureUpload) complete(ctx context.Context) error {
+	if _, err := u.blob.CommitBlockList(ctx, u.ids, nil); err != nil {
+		return azureError(fmt.Errorf("commit block list: %w", err))
+	}
+	return nil
+}
+
+// abort does nothing: the service discards uncommitted blocks after seven days,
+// and offers no call to discard them sooner.
+func (u *azureUpload) abort(context.Context) error { return nil }
+
+// azureError classifies an azblob failure for withRetry.
+func azureError(err error) error {
+	var re *azcore.ResponseError
+	if errors.As(err, &re) {
+		return sdkError(err, re.StatusCode)
+	}
+	return sdkError(err, 0)
 }
 
 // ============================================================================

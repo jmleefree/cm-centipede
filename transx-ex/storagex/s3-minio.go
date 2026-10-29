@@ -3,8 +3,10 @@ package storagex
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloud-barista/cm-centipede/transx-ex/core"
@@ -169,4 +171,100 @@ func (p *MinioProvider) DownloadFile(key, localPath string) error {
 		return fmt.Errorf("failed to download file: %w", err)
 	}
 	return nil
+}
+
+// ============================================================================
+// Multipart upload
+// ============================================================================
+
+// singlePutLimit is where the provider switches from one presigned PUT to
+// parts. minio-go itself refuses a single PUT above 5 GiB.
+func (p *MinioProvider) singlePutLimit() int64 {
+	return multipartThreshold
+}
+
+// startMultipart opens an S3 multipart upload of size bytes to key, through the
+// SDK client — and so through the SSH tunnel when there is one.
+func (p *MinioProvider) startMultipart(ctx context.Context, key string, size int64) (multipartUpload, error) {
+	// The SDK's own rule: the smallest multiple of 16 MiB that fits the object
+	// in 10,000 parts. The size must be the real one; -1 fixes it at 528 MiB.
+	_, partSize, _, err := minio.OptimalPartInfo(size, 0)
+	if err != nil {
+		return nil, permanent(fmt.Errorf("object of %d bytes cannot be uploaded in parts: %w", size, err))
+	}
+	core := minio.Core{Client: p.client}
+	uploadID, err := core.NewMultipartUpload(ctx, p.bucket, key, minio.PutObjectOptions{})
+	if err != nil {
+		return nil, minioError(fmt.Errorf("initiate multipart upload: %w", err))
+	}
+	return &minioUpload{
+		core:     core,
+		bucket:   p.bucket,
+		key:      key,
+		size:     size,
+		uploadID: uploadID,
+		part:     partSize,
+		etags:    make([]string, (size+partSize-1)/partSize),
+	}, nil
+}
+
+// minioUpload is one S3 multipart upload in progress.
+type minioUpload struct {
+	core     minio.Core
+	bucket   string
+	key      string
+	size     int64
+	uploadID string
+	part     int64
+
+	mu        sync.Mutex
+	etags     []string // by part number - 1
+	completed bool     // a complete request has been sent
+}
+
+func (u *minioUpload) partSize() int64 { return u.part }
+
+func (u *minioUpload) uploadPart(ctx context.Context, n int, size int64, r io.Reader) error {
+	// Seen as a plain reader the SDK sends the part once and leaves retrying to
+	// runMultipart, which reopens it; a seekable one it would also retry itself,
+	// up to minio.MaxRetry times inside each of runMultipart's attempts.
+	part, err := u.core.PutObjectPart(ctx, u.bucket, u.key, u.uploadID, n, struct{ io.Reader }{r}, size, minio.PutObjectPartOptions{})
+	if err != nil {
+		return minioError(err)
+	}
+	u.mu.Lock()
+	u.etags[n-1] = part.ETag
+	u.mu.Unlock()
+	return nil
+}
+
+func (u *minioUpload) complete(ctx context.Context) error {
+	parts := make([]minio.CompletePart, len(u.etags))
+	for i, etag := range u.etags {
+		parts[i] = minio.CompletePart{PartNumber: i + 1, ETag: etag}
+	}
+	retry := u.completed
+	u.completed = true
+
+	_, err := u.core.CompleteMultipartUpload(ctx, u.bucket, u.key, u.uploadID, parts, minio.PutObjectOptions{})
+	if err == nil {
+		return nil
+	}
+	// An earlier complete that succeeded but lost its response leaves nothing
+	// to complete: the upload is gone and the object is there.
+	if retry && minio.ToErrorResponse(err).Code == "NoSuchUpload" {
+		if info, serr := u.core.StatObject(ctx, u.bucket, u.key, minio.StatObjectOptions{}); serr == nil && info.Size == u.size {
+			return nil
+		}
+	}
+	return minioError(err)
+}
+
+func (u *minioUpload) abort(ctx context.Context) error {
+	return u.core.AbortMultipartUpload(ctx, u.bucket, u.key, u.uploadID)
+}
+
+// minioError classifies a minio-go failure for withRetry.
+func minioError(err error) error {
+	return sdkError(err, minio.ToErrorResponse(err).StatusCode)
 }
