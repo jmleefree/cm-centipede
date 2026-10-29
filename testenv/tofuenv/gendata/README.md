@@ -85,6 +85,8 @@ put no secrets in one.
 GENDATA_DB_SIZE_MB=2048 ./gendata --target database  # fixture + 2 GB of rows
 ./gendata --target bucket --force                  # overwrite existing data
 ./gendata --target bucket --cleanup                # the reverse: empty the bucket
+./gendata --target bucket,filesystem --large-only --large-files 3 --large-file-mb 10240
+                                                   # add 3 × 10 GB files next to the existing data
 ```
 
 `../scripts/gen-data.sh` is a thin wrapper that builds the binary first and passes
@@ -100,6 +102,9 @@ every flag straight through, which is usually more convenient.
 | `--dry-run` | `false` | Generate dummy files only; skip upload, SFTP and DB load |
 | `--force` | `false` | Skip the pre-flight checks: existing data (allows overwrite and `DROP`) and capacity |
 | `--cleanup` | `false` | Delete data instead of generating it — see below. `--target bucket` only |
+| `--large-file-mb` | `0` | Size of each large file in MB, `0` for none; overrides `GENDATA_LARGE_FILE_MB` — see [Large files](#large-files) |
+| `--large-files` | `0` | How many large files, `0` for none; overrides `GENDATA_LARGE_FILES` |
+| `--large-only` | `false` | Add only the large files, next to the data already there. `bucket`/`filesystem` only |
 | `--manifest` | `runs/last-run.json` | Where the run summary is written |
 | `--env-keys` | — | Print the environment variables gendata reads and exit; nothing else is required |
 
@@ -233,6 +238,8 @@ variables and needs no plumbing of its own:
 | `GENDATA_DUMMY_SIZE_MB` | the total over all dummy formats, in MB, split 1 MB at a time in `csv, txt, sql, json, xml, png, gif, zip` order |
 | `GENDATA_DUMMY_MAX_FILES` | the most dummy files to generate, overriding `layout.maxFiles`; `0` means no limit |
 | `GENDATA_DUMMY_SIZES` | per format, in MB: `png=0,gif=0,zip=100`. The named formats keep their size and the rest of the total is split over the others; `0` switches a format off. Without a total it overrides config.json format by format. Naming more than the total is an error |
+| `GENDATA_LARGE_FILE_MB` | the size of each [large file](#large-files), in MB; `0` adds none |
+| `GENDATA_LARGE_FILES` | how many large files; `0` adds none, and is what `.env.example` ships |
 | `GENDATA_DB_SIZE_MB` | bulk rows added to each database after the fixture, in MB |
 
 They are **not** `TF_VAR_*`: OpenTofu never reads them. In tofuenv's `.env` that
@@ -281,6 +288,7 @@ again. `--force` skips the check along with the existing-data one.
   "filesystem":    { "basePath": "/home/ubuntu/testdata", "concurrency": 10, "connections": 4 },
   "generate":      { "workers": 0 },
   "dummy":         { "sizeCSV": 1, "sizeTXT": 1, "sizeSQL": 1, "sizeJSON": 1, "sizeXML": 1, "sizePNG": 1, "sizeGIF": 1, "sizeZIP": 1 },
+  "large":         { "fileMB": 0, "files": 0 },
   "database":      { "sizeMB": 0, "batchSize": 1000, "idOffset": 1000000, "seed": 42, "workers": 4,
                      "weights": { "order_items": 30, "orders": 20, "reviews": 20, "customers": 12, "inventory_log": 10, "products": 8 } }
 }
@@ -320,6 +328,9 @@ files than leaves leaves some folders out. Shared by the bucket and filesystem t
 The run log's `dummy` line and the manifest's `files` show the plan that was actually
 used.
 
+**`large`** — the [large files](#large-files): `files` files of `fileMB` each; either
+at `0` adds none. `.env` and the flags override it.
+
 **`objectStorage`** — upload tuning. `concurrency` is how many objects go up at once
 (most are ~1 MiB, so it is the round trips that add up); a file over 32 MiB goes up as
 32 MiB parts, four at a time. `endpointOverride` points at any S3-compatible endpoint,
@@ -347,6 +358,62 @@ MongoDB (PostgreSQL's COPY stays on one); the rows are still generated in order 
 goroutine, so the seed gives the same data whatever the count.
 `weights` splits `sizeMB` across the tables by share of bytes and is normalized by
 its own sum, so switching one table off does not mean rebalancing the rest.
+
+### Large files
+
+The dummy plan keeps files small on purpose, so nothing in it ever needs more than
+one multipart upload's worth of parts — and an object over 5 GB, which S3 will not
+take in a single PUT, never appears. Large files fill that gap: `files` files of
+`fileMB` each, set in config.json, `.env` (`GENDATA_LARGE_FILE_MB`,
+`GENDATA_LARGE_FILES`) or by flag, in that order of precedence. Either at 0 adds
+none; `.env.example` ships a size of 10240 with **0 files**, so the default run adds
+nothing and `GENDATA_LARGE_FILES=3` (or `--large-files 3`) is all it takes to turn
+them on.
+
+```
+s3://<bucket>/<basePrefix>large/large_<MB>mb_<i>.bin
+<data_path>/large/large_<MB>mb_<i>.bin
+```
+
+They sit beside the `dir_*` tree, never in it, and the size is in the name, so files
+of different sizes share the folder without colliding.
+
+**Two ways to get them.** While both are above 0, every `bucket`/`filesystem` run
+adds them after the dummy set, as part of the dataset: the existing-data check covers
+them along with everything under the base path, and the capacity check counts them.
+`--large-only` adds **only** them, next to a dataset that is already there:
+
+- the dummy set is neither generated nor touched;
+- the existing-data check looks at the large files' own paths alone, so a populated
+  bucket or VM is fine and a second identical run is refused;
+- the VM check measures what is actually **in use** (SFTP `statvfs`) and refuses when
+  that plus the new files would pass 80% of the volume — the volume size alone says
+  nothing about the dataset already on it. A server without `statvfs` gets a warning
+  and no check;
+- `--target` must name `bucket` and/or `filesystem`: it defaults to `all`, and
+  `database` is refused rather than quietly loading fixtures alongside.
+
+`--force` skips these checks, as it does the others.
+
+**Nothing is staged.** N files of 10 GB would need N × 10 GB of temp space only to be
+read back once, so the bytes are produced while they are sent. Word *w* of a file is
+splitmix64 of the file's seed and *w*, which gives:
+
+- any offset without the bytes before it, so the reader offers `ReadAt` and `Size`:
+  minio-go uploads its parts in parallel (32 MiB, four at a time) and pkg/sftp
+  pipelines its writes, both of which a plain stream would lose;
+- the same bytes on every run and to every target — a file in the bucket and its twin
+  on the VM hash the same, which makes a migrated copy checkable;
+- noise that does not compress, so the size that lands is the size asked for.
+
+Files go one at a time: each is already a parallel multipart upload, and 32 of them at
+once would hold 32 × 4 × 32 MiB of part buffers. Progress is reported by bytes as they
+go, not per finished file. An SFTP transfer that fails mid-file starts that file over.
+
+The manifest records them under `large` (and `largeOnly: true` for an add). Note that
+an object uploaded in parts has an ETag that is not its MD5 (`…-320` for 10 GB), and a
+copy uploaded with a different part size gets a different one — compare sizes or
+hashes, not ETags.
 
 ### The bulk phase
 

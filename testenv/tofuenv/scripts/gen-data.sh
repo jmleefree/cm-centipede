@@ -14,6 +14,9 @@
 #     ./scripts/gen-data.sh --provider ncp --target all         # NCP resources
 #     ./scripts/gen-data.sh --target all --dry-run             # generate only, skip upload/transfer/load
 #     ./scripts/gen-data.sh --target bucket --force            # skip the existing-data check
+#     ./scripts/gen-data.sh --target bucket,filesystem --large-only
+#         (adds only the GENDATA_LARGE_FILE_MB x GENDATA_LARGE_FILES files to the
+#          dataset already there; --large-file-mb / --large-files override .env)
 #     ./scripts/gen-data.sh --provider ncp --target bucket --cleanup
 #         (the reverse: empties the whole bucket instead of filling it. NCP has no
 #          force_destroy on its bucket resource, so deprovision.sh runs this before
