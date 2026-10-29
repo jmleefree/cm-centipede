@@ -139,15 +139,14 @@ type tableColumnRule interface {
 }
 
 // rowExcludeRule is the internal contract implemented by matchers that drop rows
-// matching a predicate. Exactly one predicate form is populated per rule:
-// match() for the relational engines, whose driver negates and combines it into
-// a keep-clause using its own SQL dialect (NULL handling differs across
-// engines), and query() for MongoDB, whose driver combines the documents under
+// matching a predicate. match() is engine-shaped: a SQL predicate for the
+// relational engines, whose driver negates and combines it into a keep-clause
+// using its own SQL dialect (NULL handling differs across engines), and a query
+// document as JSON text for MongoDB, whose driver combines the documents under
 // $nor.
 type rowExcludeRule interface {
 	table() string
 	match() string
-	query() json.RawMessage
 }
 
 // objectExcludeRule is the internal contract implemented by matchers that drop a
@@ -186,22 +185,24 @@ func (o *DBMSFilterOption) Validate(dbmsType string, directAccess bool) error {
 			if rf.table() == "" {
 				return fmt.Errorf("filter: rule %d: table is required", i)
 			}
-			// A rule built in code bypasses the parser, so the query shape is
-			// re-checked here rather than assumed well-formed.
-			hasQuery := isJSONObject(rf.query())
-			if !hasQuery && jsonPresent(rf.query()) {
-				return fmt.Errorf("filter: row exclusion (table %q): query must be a JSON object", rf.table())
+			// A rule built in code bypasses the parser, so the predicate is
+			// re-checked here rather than assumed present.
+			if rf.match() == "" {
+				return fmt.Errorf("filter: rule %d: match is required", i)
 			}
 			// The predicate form has to match the engine: a raw SQL string
 			// cannot be handed to MongoDB, and a query document cannot be
 			// spliced into a SELECT.
+			isDoc, empty := jsonObjectText(rf.match())
 			switch {
-			case rowExcludeSQLEngine(dbmsType) && hasQuery:
-				return fmt.Errorf("filter: row exclusion (table %q): query is for mongodb; engine %q takes a SQL match", rf.table(), dbmsType)
-			case rowExcludeDocEngine(dbmsType) && rf.match() != "":
+			case rowExcludeSQLEngine(dbmsType) && isDoc:
+				return fmt.Errorf("filter: row exclusion (table %q): match is a query document; engine %q takes a SQL predicate", rf.table(), dbmsType)
+			case rowExcludeDocEngine(dbmsType) && !isDoc:
 				return fmt.Errorf("filter: row exclusion (collection %q): match is a SQL predicate; engine %q takes a query document", rf.table(), dbmsType)
-			case rf.match() == "" && !hasQuery:
-				return fmt.Errorf("filter: rule %d: match or query is required", i)
+			case rowExcludeDocEngine(dbmsType) && empty:
+				// {} matches every document, so it would exclude the whole
+				// collection; it is treated as a missing predicate instead.
+				return fmt.Errorf("filter: rule %d: match is required", i)
 			}
 			// Row filtering rewrites the per-table dump read, which only the
 			// direct-mode data dump performs. Native CLI dumps cannot express
@@ -348,11 +349,16 @@ func (o *DBMSFilterOption) RowExcludeMatches(table string) []string {
 	return matches
 }
 
-// RowExcludeQueries returns the query documents of all row_exclude rules naming
-// collection, in rule order, each as raw JSON. Every document describes
-// documents to REMOVE; the MongoDB driver combines them under $nor so that only
-// documents matching none of them are kept. Returns nil when there are no
-// document-form row_exclude rules for collection.
+// RowExcludeQueries returns the match of every row_exclude rule naming
+// collection as a query document, in rule order, each as raw JSON. Every
+// document describes documents to REMOVE; the MongoDB driver combines them under
+// $nor so that only documents matching none of them are kept. Returns nil when
+// there are no row_exclude rules for collection.
+//
+// An empty document is skipped: it would match — and therefore exclude —
+// everything, and a rule built in code can reach here without Validate. Text
+// that is not valid JSON is passed through, so the driver reports it with the
+// collection it belongs to.
 func (o *DBMSFilterOption) RowExcludeQueries(collection string) []json.RawMessage {
 	if o == nil {
 		return nil
@@ -360,9 +366,11 @@ func (o *DBMSFilterOption) RowExcludeQueries(collection string) []json.RawMessag
 	var queries []json.RawMessage
 	for _, r := range o.Rules {
 		if rf, ok := r.Matcher.(rowExcludeRule); ok && rf.table() == collection {
-			if q := rf.query(); isJSONObject(q) {
-				queries = append(queries, q)
+			m := rf.match()
+			if _, empty := jsonObjectText(m); m == "" || empty {
+				continue
 			}
+			queries = append(queries, json.RawMessage(m))
 		}
 	}
 	return queries

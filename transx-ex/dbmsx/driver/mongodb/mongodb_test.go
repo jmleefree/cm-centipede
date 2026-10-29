@@ -769,7 +769,7 @@ func TestBuildMongoRowFilter_NoRules(t *testing.T) {
 
 func TestBuildMongoRowFilter_SingleRule(t *testing.T) {
 	f := parseFilter(t, `{"rules":[
-		{"type":"row_exclude","table":"orders","query":{"status":"cancelled"}}
+		{"type":"row_exclude","table":"orders","match":"{\"status\":\"cancelled\"}"}
 	]}`)
 
 	got, err := buildMongoRowFilter("orders", f)
@@ -794,8 +794,8 @@ func TestBuildMongoRowFilter_MultipleRulesCombineUnderOneNor(t *testing.T) {
 	// The relational drivers AND-combine negated predicates; $nor expresses the
 	// same thing in one operator — keep documents matching none of the terms.
 	f := parseFilter(t, `{"rules":[
-		{"type":"row_exclude","table":"orders","query":{"status":"cancelled"}},
-		{"type":"row_exclude","table":"orders","query":{"total":{"$lt":10}}}
+		{"type":"row_exclude","table":"orders","match":"{\"status\":\"cancelled\"}"},
+		{"type":"row_exclude","table":"orders","match":"{\"total\":{\"$lt\":10}}"}
 	]}`)
 
 	got, err := buildMongoRowFilter("orders", f)
@@ -825,8 +825,8 @@ func TestBuildMongoRowFilter_MultipleRulesCombineUnderOneNor(t *testing.T) {
 
 func TestBuildMongoRowFilter_ScopedToCollection(t *testing.T) {
 	f := parseFilter(t, `{"rules":[
-		{"type":"row_exclude","table":"orders","query":{"status":"cancelled"}},
-		{"type":"row_exclude","table":"logs","query":{"level":"debug"}}
+		{"type":"row_exclude","table":"orders","match":"{\"status\":\"cancelled\"}"},
+		{"type":"row_exclude","table":"logs","match":"{\"level\":\"debug\"}"}
 	]}`)
 
 	got, err := buildMongoRowFilter("logs", f)
@@ -847,7 +847,7 @@ func TestBuildMongoRowFilter_ExtendedJSONValue(t *testing.T) {
 	// UnmarshalExtJSON is used so a predicate can name a typed value rather than
 	// being limited to what plain JSON can express.
 	f := parseFilter(t, `{"rules":[
-		{"type":"row_exclude","table":"orders","query":{"created":{"$lt":{"$date":"2023-01-01T00:00:00Z"}}}}
+		{"type":"row_exclude","table":"orders","match":"{\"created\":{\"$lt\":{\"$date\":\"2023-01-01T00:00:00Z\"}}}"}
 	]}`)
 
 	got, err := buildMongoRowFilter("orders", f)
@@ -866,8 +866,8 @@ func TestBuildMongoRowFilter_ExtendedJSONValue(t *testing.T) {
 }
 
 func TestBuildMongoRowFilter_InvalidQueryReportsCollection(t *testing.T) {
-	// The parser rejects a malformed query, so reaching the driver with one takes
-	// a rule built in code. It must fail loudly rather than dump everything.
+	// Validate rejects a malformed query document, so reaching the driver with
+	// one takes a rule built in code. It must fail loudly rather than dump everything.
 	f := &filterpkg.DBMSFilterOption{Rules: []filterpkg.FilterRule{
 		filterpkg.ExcludeDocuments("orders", json.RawMessage(`{"status":`)),
 	}}

@@ -13,7 +13,7 @@ import (
 
 func TestUnmarshal_RowExclude_Query(t *testing.T) {
 	o := parse(t, `{"rules":[
-		{"type":"row_exclude","table":"orders","query":{"status":"cancelled"}}
+		{"type":"row_exclude","table":"orders","match":"{\"status\":\"cancelled\"}"}
 	]}`)
 	if len(o.Rules) != 1 {
 		t.Fatalf("want 1 rule, got %d", len(o.Rules))
@@ -38,9 +38,9 @@ func TestUnmarshal_RowExclude_Query(t *testing.T) {
 
 func TestRowExcludeQueries_OrderAndScoping(t *testing.T) {
 	o := parse(t, `{"rules":[
-		{"type":"row_exclude","table":"orders","query":{"status":"cancelled"}},
-		{"type":"row_exclude","table":"logs","query":{"level":"debug"}},
-		{"type":"row_exclude","table":"orders","query":{"total":{"$lt":10}}}
+		{"type":"row_exclude","table":"orders","match":"{\"status\":\"cancelled\"}"},
+		{"type":"row_exclude","table":"logs","match":"{\"level\":\"debug\"}"},
+		{"type":"row_exclude","table":"orders","match":"{\"total\":{\"$lt\":10}}"}
 	]}`)
 
 	got := o.RowExcludeQueries("orders")
@@ -67,28 +67,56 @@ func TestRowExcludeQueries_NilOption(t *testing.T) {
 // MongoDB, and a query document cannot be spliced into a SELECT.
 func TestValidate_RowExclude_EnginePairing(t *testing.T) {
 	sqlForm := parse(t, `{"rules":[{"type":"row_exclude","table":"orders","match":"total < 10"}]}`)
-	docForm := parse(t, `{"rules":[{"type":"row_exclude","table":"orders","query":{"total":{"$lt":10}}}]}`)
+	docForm := parse(t, `{"rules":[{"type":"row_exclude","table":"orders","match":"{\"total\":{\"$lt\":10}}"}]}`)
 
 	for _, engine := range []string{"mysql", "mariadb", "postgresql"} {
 		if err := sqlForm.Validate(engine, true); err != nil {
-			t.Errorf("match on %s should be valid: %v", engine, err)
+			t.Errorf("SQL match on %s should be valid: %v", engine, err)
 		}
 		err := docForm.Validate(engine, true)
 		if err == nil {
-			t.Errorf("query on %s must be rejected", engine)
-		} else if !strings.Contains(err.Error(), "query is for mongodb") {
-			t.Errorf("unexpected error for query on %s: %v", engine, err)
+			t.Errorf("query document on %s must be rejected", engine)
+		} else if !strings.Contains(err.Error(), "takes a SQL predicate") {
+			t.Errorf("unexpected error for query document on %s: %v", engine, err)
 		}
 	}
 
 	if err := docForm.Validate("mongodb", true); err != nil {
-		t.Errorf("query on mongodb should be valid: %v", err)
+		t.Errorf("query document on mongodb should be valid: %v", err)
 	}
 	err := sqlForm.Validate("mongodb", true)
 	if err == nil {
-		t.Error("match on mongodb must be rejected")
+		t.Error("SQL match on mongodb must be rejected")
 	} else if !strings.Contains(err.Error(), "takes a query document") {
-		t.Errorf("unexpected error for match on mongodb: %v", err)
+		t.Errorf("unexpected error for SQL match on mongodb: %v", err)
+	}
+}
+
+// MongoDB's match must be a JSON object; anything else is a SQL predicate as far
+// as the pairing is concerned, and an empty object would exclude every document.
+func TestValidate_RowExclude_MongoMatchShape(t *testing.T) {
+	cases := []struct {
+		name    string
+		match   string
+		wantErr string
+	}{
+		{"array", `[{"a":1}]`, "takes a query document"},
+		{"scalar", `"a = 1"`, "takes a query document"},
+		{"null", `null`, "takes a query document"},
+		{"malformed", `{"a":`, "takes a query document"},
+		{"empty object", `{}`, "match is required"},
+		{"empty object with spaces", "{ \n }", "match is required"},
+	}
+	for _, c := range cases {
+		o := &DBMSFilterOption{Rules: []FilterRule{ExcludeRows("orders", c.match)}}
+		err := o.Validate("mongodb", true)
+		if err == nil {
+			t.Errorf("%s: expected a validation error", c.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.wantErr) {
+			t.Errorf("%s: error = %v, want it to mention %q", c.name, err, c.wantErr)
+		}
 	}
 }
 
@@ -96,7 +124,7 @@ func TestValidate_RowExclude_EnginePairing(t *testing.T) {
 // mongodump's --query needs a single --collection, so per-collection predicates
 // cannot be expressed in one invocation.
 func TestValidate_RowExcludeQuery_RequiresDirect(t *testing.T) {
-	o := parse(t, `{"rules":[{"type":"row_exclude","table":"orders","query":{"status":"cancelled"}}]}`)
+	o := parse(t, `{"rules":[{"type":"row_exclude","table":"orders","match":"{\"status\":\"cancelled\"}"}]}`)
 	if err := o.Validate("mongodb", true); err != nil {
 		t.Errorf("direct access should be valid: %v", err)
 	}
@@ -116,30 +144,25 @@ func TestUnmarshal_RowExclude_PredicateFormErrors(t *testing.T) {
 		wantErr string
 	}{
 		{
-			// Which form is right depends on the engine, but "exactly one" does
-			// not, so parsing settles it before Validate sees the rule.
-			name:    "both forms",
-			doc:     `{"rules":[{"type":"row_exclude","table":"t","match":"a = 1","query":{"a":1}}]}`,
-			wantErr: "mutually exclusive",
-		},
-		{
-			name:    "neither form",
+			// Which shape match takes depends on the engine, so parsing only
+			// requires it to be present; Validate checks the shape.
+			name:    "match missing",
 			doc:     `{"rules":[{"type":"row_exclude","table":"t"}]}`,
-			wantErr: "either match",
+			wantErr: "match is required",
 		},
 		{
-			name:    "query is an array",
-			doc:     `{"rules":[{"type":"row_exclude","table":"t","query":[{"a":1}]}]}`,
-			wantErr: "must be a JSON object",
+			name:    "match is empty",
+			doc:     `{"rules":[{"type":"row_exclude","table":"t","match":""}]}`,
+			wantErr: "match is required",
 		},
 		{
-			name:    "query is a scalar",
-			doc:     `{"rules":[{"type":"row_exclude","table":"t","query":"a = 1"}]}`,
-			wantErr: "must be a JSON object",
+			name:    "match is an object, not text",
+			doc:     `{"rules":[{"type":"row_exclude","table":"t","match":{"a":1}}]}`,
+			wantErr: "cannot unmarshal",
 		},
 		{
 			name:    "table missing",
-			doc:     `{"rules":[{"type":"row_exclude","query":{"a":1}}]}`,
+			doc:     `{"rules":[{"type":"row_exclude","match":"{\"a\":1}"}]}`,
 			wantErr: "table is required",
 		},
 	}
@@ -157,21 +180,21 @@ func TestUnmarshal_RowExclude_PredicateFormErrors(t *testing.T) {
 	}
 }
 
-// A JSON null query is treated as absent rather than as an empty predicate,
-// which would otherwise exclude every document.
-func TestUnmarshal_RowExclude_NullQueryIsAbsent(t *testing.T) {
-	var o DBMSFilterOption
-	err := json.Unmarshal([]byte(`{"rules":[{"type":"row_exclude","table":"t","query":null}]}`), &o)
-	if err == nil {
-		t.Fatal("query:null with no match must be rejected as a missing predicate")
-	}
-	if !strings.Contains(err.Error(), "either match") {
-		t.Errorf("error = %v", err)
+// An empty query document would match — and therefore exclude — every
+// document, so it never reaches the driver even from a rule built in code.
+func TestRowExcludeQueries_SkipsEmptyDocument(t *testing.T) {
+	o := &DBMSFilterOption{Rules: []FilterRule{
+		ExcludeDocuments("orders", json.RawMessage(`{}`)),
+		ExcludeDocuments("orders", json.RawMessage(`{"status":"cancelled"}`)),
+	}}
+	got := o.RowExcludeQueries("orders")
+	if len(got) != 1 || !strings.Contains(string(got[0]), "cancelled") {
+		t.Errorf("RowExcludeQueries = %s, want only the non-empty document", got)
 	}
 }
 
 func TestRowExcludeQuery_RoundTrip(t *testing.T) {
-	doc := `{"rules":[{"type":"row_exclude","table":"orders","query":{"status":"cancelled"}}]}`
+	doc := `{"rules":[{"type":"row_exclude","table":"orders","match":"{\"status\":\"cancelled\"}"}]}`
 	o := parse(t, doc)
 	out, err := json.Marshal(o)
 	if err != nil {

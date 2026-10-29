@@ -1,7 +1,6 @@
 package filter
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 )
@@ -27,26 +26,24 @@ func init() {
 // itself and all non-matching rows are retained, so it narrows a table's data
 // without excluding the table.
 //
-// The predicate is engine-shaped, and exactly one form must be set:
+// Match is engine-shaped, and Validate enforces the pairing:
 //
-//   - Match — a raw SQL predicate for the relational engines. The driver negates
-//     it into a keep-clause using its own dialect's NULL handling.
-//   - Query — a MongoDB query document for MongoDB. The driver combines the
+//   - SQL engines — a raw SQL predicate. The driver negates it into a
+//     keep-clause using its own dialect's NULL handling.
+//   - MongoDB — a query document as JSON text. The driver combines the
 //     documents under $nor, which keeps everything that matches none of them.
 //
-// Query is held as raw JSON because this package depends only on the standard
-// library: converting it to BSON is the MongoDB driver's job.
+// The query document is held as text because this package depends only on the
+// standard library: converting it to BSON is the MongoDB driver's job.
 type rowExcludeMatcher struct {
-	Table string          `json:"table"`
-	Match string          `json:"match,omitempty"`
-	Query json.RawMessage `json:"query,omitempty"`
+	Table string `json:"table"`
+	Match string `json:"match"`
 }
 
 func newRowExcludeMatcher(raw json.RawMessage) (FilterMatcher, error) {
 	var c struct {
-		Table string          `json:"table"`
-		Match string          `json:"match"`
-		Query json.RawMessage `json:"query"`
+		Table string `json:"table"`
+		Match string `json:"match"`
 	}
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil, err
@@ -54,39 +51,21 @@ func newRowExcludeMatcher(raw json.RawMessage) (FilterMatcher, error) {
 	if c.Table == "" {
 		return nil, fmt.Errorf("row_exclude: table is required")
 	}
-
-	// An explicit null is treated as an absent field, not as an empty predicate:
-	// an empty query document would match — and therefore exclude — everything.
-	if !jsonPresent(c.Query) {
-		c.Query = nil
-	} else if !isJSONObject(c.Query) {
-		return nil, fmt.Errorf("row_exclude: query must be a JSON object")
+	if c.Match == "" {
+		return nil, fmt.Errorf("row_exclude: match is required")
 	}
-	hasQuery := c.Query != nil
-
-	// Which form is valid depends on the engine, but "exactly one" does not, so
-	// it is settled here rather than in Validate.
-	switch {
-	case c.Match == "" && !hasQuery:
-		return nil, fmt.Errorf("row_exclude: either match (SQL engines) or query (MongoDB) is required")
-	case c.Match != "" && hasQuery:
-		return nil, fmt.Errorf("row_exclude: match and query are mutually exclusive")
-	}
-
-	return &rowExcludeMatcher{Table: c.Table, Match: c.Match, Query: c.Query}, nil
+	return &rowExcludeMatcher{Table: c.Table, Match: c.Match}, nil
 }
 
-// jsonPresent reports whether raw carries a value at all. An omitted field and
-// an explicit JSON null both count as absent.
-func jsonPresent(raw json.RawMessage) bool {
-	trimmed := bytes.TrimSpace(raw)
-	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
-}
-
-// isJSONObject reports whether raw is a present JSON object — not an array, not a
-// scalar, not null.
-func isJSONObject(raw json.RawMessage) bool {
-	return jsonPresent(raw) && bytes.TrimSpace(raw)[0] == '{'
+// jsonObjectText reports whether s is a JSON object — the form MongoDB's row
+// predicate takes — and whether that object is empty. Invalid JSON, arrays,
+// scalars and null all report ok=false.
+func jsonObjectText(s string) (ok, empty bool) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(s), &m); err != nil || m == nil {
+		return false, false
+	}
+	return true, len(m) == 0
 }
 
 // ExcludeRows builds a row_exclude rule for the relational engines (no JSON
@@ -101,9 +80,9 @@ func ExcludeRows(table, match string) FilterRule {
 // other documents are kept.
 //
 // query is a MongoDB query document encoded as JSON, e.g.
-// []byte(`{"status":"cancelled"}`).
+// []byte(`{"status":"cancelled"}`); it becomes the rule's match text.
 func ExcludeDocuments(collection string, query json.RawMessage) FilterRule {
-	return FilterRule{Matcher: &rowExcludeMatcher{Table: collection, Query: query}}
+	return FilterRule{Matcher: &rowExcludeMatcher{Table: collection, Match: string(query)}}
 }
 
 func (m *rowExcludeMatcher) Type() string { return "row_exclude" }
@@ -125,9 +104,8 @@ func (m *rowExcludeMatcher) AppliesTo(dbmsType string) bool {
 	return false
 }
 
-func (m *rowExcludeMatcher) table() string          { return m.Table }
-func (m *rowExcludeMatcher) match() string          { return m.Match }
-func (m *rowExcludeMatcher) query() json.RawMessage { return m.Query }
+func (m *rowExcludeMatcher) table() string { return m.Table }
+func (m *rowExcludeMatcher) match() string { return m.Match }
 
 // rowExcludeSQLEngine reports whether dbmsType takes a raw SQL predicate.
 func rowExcludeSQLEngine(dbmsType string) bool {
