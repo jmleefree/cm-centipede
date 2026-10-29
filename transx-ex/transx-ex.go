@@ -201,6 +201,15 @@ func RsyncFilterArgs(opt *PathFilterOption) ([]string, error) {
 // ValidateDBMS reports whether m is structurally and semantically usable.
 func ValidateDBMS(m DBMSMigrationModel) error { return dbmsx.Validate(m) }
 
+// ObjectRuleMatches reports whether a DBMS object_exclude rule of kind naming
+// rule takes the object InspectDBMS lists as inventoryName on dbmsType. A plan
+// can check with it that every rule names an object the source holds; a
+// PostgreSQL routine rule may name every overload (name, schema.name) or one
+// (schema.name(args)). See dbmsx.ObjectRuleMatches.
+func ObjectRuleMatches(dbmsType, kind, rule, inventoryName string) bool {
+	return dbmsx.ObjectRuleMatches(dbmsType, kind, rule, inventoryName)
+}
+
 // CheckCharset reports what stands between the character-set handling of two
 // database endpoints, most severe first. It reads both and changes neither.
 //

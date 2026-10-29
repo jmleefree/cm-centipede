@@ -10,6 +10,7 @@ import (
 
 	drvpkg "github.com/cloud-barista/cm-centipede/transx-ex/dbmsx/driver"
 	execpkg "github.com/cloud-barista/cm-centipede/transx-ex/dbmsx/executor"
+	filterpkg "github.com/cloud-barista/cm-centipede/transx-ex/dbmsx/filter"
 )
 
 // =============================================================================
@@ -227,6 +228,17 @@ type DBMSMigrationModel struct {
 	// default, $TMPDIR/transxex-staging or /tmp/transxex-staging. It has no
 	// effect on an SSH-to-SSH pipe, which stages nothing.
 	StagingDir string `json:"stagingDir,omitempty"`
+}
+
+// =============================================================================
+// Filter rule names
+// =============================================================================
+
+// ObjectRuleMatches reports whether an object_exclude rule of kind naming rule
+// takes the object Inspect lists as inventoryName on dbmsType — the answer the
+// engine's dump gives, read off an inventory. See filter.ObjectNameMatches.
+func ObjectRuleMatches(dbmsType, kind, rule, inventoryName string) bool {
+	return filterpkg.ObjectNameMatches(dbmsType, kind, rule, inventoryName)
 }
 
 // =============================================================================
