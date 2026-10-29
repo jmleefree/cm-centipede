@@ -887,7 +887,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "match": {
-                    "description": "type=row_exclude",
+                    "description": "type=row_exclude. SQL engines: a predicate (\"status = 'cancelled'\").\nMongoDB: a query document, sent as JSON text or as a JSON object.",
                     "type": "string"
                 },
                 "name": {

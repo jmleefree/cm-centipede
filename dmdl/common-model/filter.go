@@ -1,5 +1,11 @@
 package commonmodel
 
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+)
+
 // filter.go defines centipede's own mirror of the transx-ex and dbmsx filter
 // pipelines. The model package stays free of any library dependency; the core
 // layer converts these mirror types into the concrete transx / dbmsx filter
@@ -71,9 +77,10 @@ const (
 //
 //	the named Columns within it (the table itself is kept).
 //
-// Type "row_exclude":    drop rows of Table for which the SQL predicate Match is
+// Type "row_exclude":    drop rows of Table for which Match is TRUE. Match is a
 //
-//	TRUE (relational engines only; requires direct access).
+//	SQL predicate on the relational engines and a MongoDB query
+//	document on MongoDB (requires direct access).
 //
 // Type "object_exclude": drop the schema object of Kind named Name. Table is an
 //
@@ -82,9 +89,41 @@ type DBMSFilterRule struct {
 	Type    string   `json:"type"`
 	Table   string   `json:"table,omitempty"`
 	Columns []string `json:"columns,omitempty"` // type=table_column (empty => whole table)
-	Match   string   `json:"match,omitempty"`   // type=row_exclude
-	Kind    string   `json:"kind,omitempty"`    // type=object_exclude (view|index|function|...)
-	Name    string   `json:"name,omitempty"`    // type=object_exclude
+	// type=row_exclude. SQL engines: a predicate ("status = 'cancelled'").
+	// MongoDB: a query document, sent as JSON text or as a JSON object.
+	Match string `json:"match,omitempty"`
+	Kind  string `json:"kind,omitempty"` // type=object_exclude (view|index|function|...)
+	Name  string `json:"name,omitempty"` // type=object_exclude
+}
+
+// UnmarshalJSON accepts match as a string or as a JSON object. An object is kept
+// as its compact JSON text, so MongoDB's query document travels in the same
+// string field as a SQL predicate; transx-ex decides which form the engine takes.
+func (r *DBMSFilterRule) UnmarshalJSON(data []byte) error {
+	type plain DBMSFilterRule
+	var aux struct {
+		plain
+		Match json.RawMessage `json:"match,omitempty"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*r = DBMSFilterRule(aux.plain)
+	raw := bytes.TrimSpace(aux.Match)
+	switch {
+	case len(raw) == 0 || bytes.Equal(raw, []byte("null")):
+	case raw[0] == '"':
+		return json.Unmarshal(raw, &r.Match)
+	case raw[0] == '{':
+		var buf bytes.Buffer
+		if err := json.Compact(&buf, raw); err != nil {
+			return err
+		}
+		r.Match = buf.String()
+	default:
+		return fmt.Errorf("match must be a string or a JSON object")
+	}
+	return nil
 }
 
 // ── Per-resource filters (shared by the plan request and the plan output) ────
