@@ -37,6 +37,12 @@ func ToTransxFilter(rules []commonmodel.PathFilterRule) (*transxex.PathFilterOpt
 	return opt, nil
 }
 
+// ToDBMSFilter is toDBMSFilter for a caller outside the migration — validation,
+// which inspects the source through the very filter the migration dumped it with.
+func ToDBMSFilter(rules []commonmodel.DBMSFilterRule) (*transxex.DBMSFilterOption, error) {
+	return toDBMSFilter(rules)
+}
+
 // toDBMSFilter converts one database's mirror exclude rules into a
 // transxex.DBMSFilterOption. Returns (nil, nil) when there are no rules, which
 // migrates that database in full.

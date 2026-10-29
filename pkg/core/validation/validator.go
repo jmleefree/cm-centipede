@@ -741,6 +741,15 @@ func validateDatabase(
 	srcLoc.Metric = metric
 	dstLoc.Metric = metric
 
+	// The source is inspected through the filter the migration dumped it with,
+	// so its schema-object lists name what the target should hold: transx-ex
+	// narrows them as the dump did, including what a rule removes without naming
+	// it — the foreign keys and triggers of an excluded table. The target is
+	// inspected as it is.
+	if srcLoc.Filter, err = migration.ToDBMSFilter(d.Rules); err != nil {
+		return nil, fmt.Errorf("build the migration filter: %w", err)
+	}
+
 	opt.report("inspecting tables and schema objects")
 	var srcInfo, dstInfo *transxex.DBMSInfo
 	err = bothSides(
@@ -765,7 +774,7 @@ func validateDatabase(
 	var details []model.ValidationDetailItem
 	details = append(details, countRows(ctx, srcLoc, dstLoc, m.DBType, srcInfo, dstInfo, renamed, d.Rules, opt)...)
 	details = append(details, compareDBTables(srcInfo, dstInfo, renamed, d.Rules)...)
-	details = append(details, compareSchemaObjects(srcInfo, dstInfo, d.Rules)...)
+	details = append(details, compareSchemaObjects(srcInfo, dstInfo)...)
 	details = append(details, compareCharsets(srcInfo, dstInfo)...)
 	details = append(details, deprecatedForeignKeys(dstLoc, dstInfo)...)
 	return details, nil
@@ -828,11 +837,10 @@ func countRows(
 	type pair struct{ si, di int }
 	var pairs []pair
 	for si, t := range src.Tables {
-		k := key(t)
-		if dropped[k] {
+		if namesTable(dropped, t) {
 			continue
 		}
-		if di, ok := dstIdx[k]; ok {
+		if di, ok := dstIdx[key(t)]; ok {
 			pairs = append(pairs, pair{si, di})
 		}
 	}
@@ -973,12 +981,12 @@ func schemaObjectKinds(i *transxex.DBMSInfo) map[string][]string {
 // compareSchemaObjects reports the schema objects the source holds and the
 // target does not, and vice versa.
 //
-// An object the migration was told to exclude is not a miss: comparing without
-// the filter would turn every deliberate exclusion into a false positive. The
-// reverse direction needs no such allowance — the target is verified empty
+// An object the migration was told to exclude is not a miss, and it is not in
+// src to begin with: validateDatabase inspects the source through the
+// migration's filter, which leaves out what the filtered dump left out. The
+// reverse direction needs no allowance either — the target is verified empty
 // before a migration starts, so anything in it came from this migration.
-func compareSchemaObjects(src, dst *transxex.DBMSInfo, rules []commonmodel.DBMSFilterRule) []model.ValidationDetailItem {
-	excluded := excludedObjects(rules)
+func compareSchemaObjects(src, dst *transxex.DBMSInfo) []model.ValidationDetailItem {
 	srcKinds := schemaObjectKinds(src)
 	dstKinds := schemaObjectKinds(dst)
 
@@ -1003,7 +1011,7 @@ func compareSchemaObjects(src, dst *transxex.DBMSInfo, rules []commonmodel.DBMSF
 		srcSet := make(map[string]bool, len(srcList))
 		for _, n := range srcList {
 			srcSet[schemaObjectKey(kind, n)] = true
-			if dstSet[schemaObjectKey(kind, n)] || excluded[kind+":"+n] {
+			if dstSet[schemaObjectKey(kind, n)] {
 				continue
 			}
 			details = append(details, model.ValidationDetailItem{
@@ -1050,18 +1058,6 @@ func schemaObjectKey(kind, name string) string {
 		return name
 	}
 	return routineArgModeIN.ReplaceAllString(name, "$1")
-}
-
-// excludedObjects indexes the object_exclude rules as "kind:name", so a
-// deliberately dropped object is not reported as missing.
-func excludedObjects(rules []commonmodel.DBMSFilterRule) map[string]bool {
-	out := map[string]bool{}
-	for _, r := range rules {
-		if r.Type == commonmodel.DBMSRuleObjectExclude && r.Kind != "" && r.Name != "" {
-			out[r.Kind+":"+r.Name] = true
-		}
-	}
-	return out
 }
 
 // compareCharsets reports text-handling differences as warnings rather than
@@ -1170,8 +1166,10 @@ func tableKey(renamed bool) func(transxex.TableInfo) string {
 func compareDBTables(src, dst *transxex.DBMSInfo, renamed bool, rules []commonmodel.DBMSFilterRule) []model.ValidationDetailItem {
 	key := tableKey(renamed)
 	srcMap := make(map[string]int64, len(src.Tables))
+	srcTables := make(map[string]transxex.TableInfo, len(src.Tables))
 	for _, t := range src.Tables {
 		srcMap[key(t)] = t.RowCount
+		srcTables[key(t)] = t
 	}
 	dstMap := make(map[string]int64, len(dst.Tables))
 	for _, t := range dst.Tables {
@@ -1189,7 +1187,7 @@ func compareDBTables(src, dst *transxex.DBMSInfo, renamed bool, rules []commonmo
 	sort.Strings(srcNames)
 
 	for _, name := range srcNames {
-		if dropped[name] {
+		if namesTable(dropped, srcTables[name]) {
 			// The migration was told not to carry this table, so its absence is
 			// the plan working, not a miss.
 			skipped++
@@ -1203,7 +1201,7 @@ func compareDBTables(src, dst *transxex.DBMSInfo, renamed bool, rules []commonmo
 		case srcCount == dstCount:
 			// Equal is equal, whether or not a row filter applied to this table:
 			// the predicate simply matched nothing.
-		case rowFiltered[name] && dstCount < srcCount:
+		case namesTable(rowFiltered, srcTables[name]) && dstCount < srcCount:
 			// A row_exclude rule dropped rows on purpose, and how many it dropped
 			// is only knowable by running the predicate — which validation does
 			// not do. Fewer rows is therefore expected and unquantified, so it is
@@ -1257,6 +1255,15 @@ func filteredTables(rules []commonmodel.DBMSFilterRule) (dropped, rowFiltered ma
 		}
 	}
 	return dropped, rowFiltered
+}
+
+// namesTable reports whether a set of rule table names (from filteredTables)
+// names the source table t. A rule may name a PostgreSQL table bare or as
+// schema.name, and transx-ex takes both: the bare form in every schema. The
+// table's own source schema is used, so a rule still finds its table when the
+// migration renamed the schema on the target.
+func namesTable(set map[string]bool, t transxex.TableInfo) bool {
+	return set[t.Name] || (t.PgSchema != "" && set[t.PgSchema+"."+t.Name])
 }
 
 // resolveDBLoc maps a ConnectionRef to a transxex.DBMSLocation for DBMS validation.
