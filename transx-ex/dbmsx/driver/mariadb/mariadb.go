@@ -1217,7 +1217,12 @@ func (d *MariaDBDriver) inspectViaSQL(ctx context.Context, loc base.DBMSLocation
 	// Database-wide schema objects (opt-in).
 	if m.needSchemaScan() {
 		if m.foreignKeys {
-			if info.ForeignKeys, err = d.listForeignKeys(ctx, db, loc.Database); err != nil {
+			if loc.Filter != nil {
+				info.ForeignKeys, err = d.listForeignKeysFiltered(ctx, db, loc.Database, loc.Filter)
+			} else {
+				info.ForeignKeys, err = d.listForeignKeys(ctx, db, loc.Database)
+			}
+			if err != nil {
 				return nil, err
 			}
 		}
@@ -1237,7 +1242,7 @@ func (d *MariaDBDriver) inspectViaSQL(ctx context.Context, loc base.DBMSLocation
 			}
 		}
 		if m.triggers {
-			if info.Triggers, err = d.listTriggers(ctx, db, loc.Database, nil); err != nil {
+			if info.Triggers, err = d.listTriggers(ctx, db, loc.Database, loc.Filter); err != nil {
 				return nil, err
 			}
 		}
@@ -1245,6 +1250,9 @@ func (d *MariaDBDriver) inspectViaSQL(ctx context.Context, loc base.DBMSLocation
 			if info.Events, err = d.listEvents(ctx, db, loc.Database); err != nil {
 				return nil, err
 			}
+		}
+		if loc.Filter != nil {
+			mariadbFilterSchemaObjects(loc.Filter, info)
 		}
 	}
 	return info, nil
@@ -1348,8 +1356,12 @@ func (d *MariaDBDriver) inspectViaSSH(ctx context.Context, loc base.DBMSLocation
 	if m.needSchemaScan() {
 		db := mariadbEscape(loc.Database)
 		if m.foreignKeys {
-			info.ForeignKeys, err = d.listNamesViaSSH(exec, cfg, fmt.Sprintf(
-				`SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='%s' AND CONSTRAINT_TYPE='FOREIGN KEY' ORDER BY CONSTRAINT_NAME`, db))
+			if loc.Filter != nil {
+				info.ForeignKeys, err = d.listForeignKeysFilteredViaSSH(exec, cfg, loc.Database, loc.Filter)
+			} else {
+				info.ForeignKeys, err = d.listNamesViaSSH(exec, cfg, fmt.Sprintf(
+					`SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA='%s' AND CONSTRAINT_TYPE='FOREIGN KEY' ORDER BY CONSTRAINT_NAME`, db))
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -1376,8 +1388,12 @@ func (d *MariaDBDriver) inspectViaSSH(ctx context.Context, loc base.DBMSLocation
 			}
 		}
 		if m.triggers {
-			info.Triggers, err = d.listNamesViaSSH(exec, cfg, fmt.Sprintf(
-				`SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA='%s' ORDER BY TRIGGER_NAME`, db))
+			if loc.Filter != nil {
+				info.Triggers, err = d.listTriggersFilteredViaSSH(exec, cfg, loc.Database, loc.Filter)
+			} else {
+				info.Triggers, err = d.listNamesViaSSH(exec, cfg, fmt.Sprintf(
+					`SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA='%s' ORDER BY TRIGGER_NAME`, db))
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -1388,6 +1404,9 @@ func (d *MariaDBDriver) inspectViaSSH(ctx context.Context, loc base.DBMSLocation
 			if err != nil {
 				return nil, err
 			}
+		}
+		if loc.Filter != nil {
+			mariadbFilterSchemaObjects(loc.Filter, info)
 		}
 	}
 	return info, nil

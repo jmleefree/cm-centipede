@@ -1335,6 +1335,9 @@ func (d *MongoDBDriver) inspectViaDriver(ctx context.Context, loc base.DBMSLocat
 			}
 			info.Validators = validated
 		}
+		if loc.Filter != nil {
+			mongoFilterSchemaObjects(loc.Filter, info)
+		}
 	}
 	return info, nil
 }
@@ -1570,6 +1573,9 @@ print("`+mongoJSONSentinel+`" + JSON.stringify(out));`, countExpr)
 				return nil, fmt.Errorf("list validators: %w", err)
 			}
 			info.Validators = names
+		}
+		if loc.Filter != nil {
+			mongoFilterSchemaObjects(loc.Filter, info)
 		}
 	}
 	return info, nil

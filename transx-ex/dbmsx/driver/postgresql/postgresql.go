@@ -1571,7 +1571,19 @@ func (d *PostgreSQLDriver) inspectViaSQL(ctx context.Context, loc base.DBMSLocat
 
 	// Schema objects across the selected schemas (opt-in).
 	if m.needSchemaScan() {
-		for _, item := range pgSchemaObjectFields(m, info, schemas) {
+		fields := pgSchemaObjectFields(m, info, schemas)
+		if loc.Filter != nil {
+			fields = pgFilteredSchemaObjectFields(m, info, schemas, loc.Filter)
+		}
+		for _, item := range fields {
+			if item.keep != nil {
+				rows, err := d.queryRowMaps(ctx, conn, item.query)
+				if err != nil {
+					return nil, err
+				}
+				*item.dst = pgKeptNames(rows, item.keep)
+				continue
+			}
 			names, err := d.queryNames(ctx, conn, item.query)
 			if err != nil {
 				return nil, err
@@ -1641,10 +1653,13 @@ func (d *PostgreSQLDriver) pgSchemaStatsViaSQL(ctx context.Context, conn *pgx.Co
 }
 
 // pgSchemaObjectField pairs a schema-object enumeration query with the DBMSInfo
-// slice it populates.
+// slice it populates. keep is set only for an inspection with a filter (see
+// pgFilteredSchemaObjectFields): the query then returns detail columns besides
+// "name", and keep decides each row.
 type pgSchemaObjectField struct {
 	query string
 	dst   *[]string
+	keep  func(pgInventoryRow) bool
 }
 
 // pgObjectQuery* build the statements that enumerate schema-object names across
@@ -1903,12 +1918,20 @@ func (d *PostgreSQLDriver) inspectViaSSH(ctx context.Context, loc base.DBMSLocat
 
 	// Schema objects across the selected schemas (opt-in).
 	if m.needSchemaScan() {
-		for _, item := range pgSchemaObjectFields(m, info, schemas) {
+		fields := pgSchemaObjectFields(m, info, schemas)
+		if loc.Filter != nil {
+			fields = pgFilteredSchemaObjectFields(m, info, schemas, loc.Filter)
+		}
+		for _, item := range fields {
 			rows, err := d.pgQueryJSONViaSSH(exec, cfg, loc.Database, item.query)
 			if err != nil {
 				return nil, err
 			}
 			pgSortRows(rows, "name")
+			if item.keep != nil {
+				*item.dst = pgKeptNames(rows, item.keep)
+				continue
+			}
 			names := make([]string, 0, len(rows))
 			for _, row := range rows {
 				names = append(names, row["name"])
@@ -2851,6 +2874,17 @@ func pgObjectExcluded(filter *filterpkg.DBMSFilterOption, kind, schema, name str
 	return filter.IsObjectExcluded(kind, name) || filter.IsObjectExcluded(kind, schema+"."+name)
 }
 
+// pgRoutineExcluded is pgObjectExcluded for a function or procedure, which a
+// rule may also name by its signature (filterpkg.PgRoutineRuleMatches).
+func pgRoutineExcluded(filter *filterpkg.DBMSFilterOption, kind, schema, name, args string) bool {
+	for _, rule := range filter.ObjectExcludeNames(kind) {
+		if filterpkg.PgRoutineRuleMatches(rule, schema, name, args) {
+			return true
+		}
+	}
+	return false
+}
+
 func pgObjectExcludedInTable(filter *filterpkg.DBMSFilterOption, kind string, t pgTableRef, name string) bool {
 	return filter.IsObjectExcludedInTable(kind, t.Name, name) ||
 		filter.IsObjectExcludedInTable(kind, t.String(), name)
@@ -3405,7 +3439,8 @@ func (d *PostgreSQLDriver) listMatViews(ctx context.Context, conn *pgx.Conn, sc 
 
 // listFunctions returns CREATE OR REPLACE FUNCTION/PROCEDURE statements.
 // prokind: 'f' = function, 'p' = procedure. Objects named by an object_exclude
-// rule of the matching kind are skipped.
+// rule of the matching kind are skipped, by name or by signature
+// (pgRoutineExcluded).
 // listFunctions returns the routine definitions the server renders, unchanged.
 //
 // pg_get_functiondef writes the whole CREATE statement, including the routine's
@@ -3419,7 +3454,7 @@ func (d *PostgreSQLDriver) listFunctions(ctx context.Context, conn *pgx.Conn, sc
 		kind = filterpkg.ObjectKindProcedure
 	}
 	rows, err := conn.Query(ctx,
-		`SELECT n.nspname, p.proname, pg_get_functiondef(p.oid)
+		`SELECT n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), pg_get_functiondef(p.oid)
 		FROM pg_proc p
 		JOIN pg_namespace n ON n.oid = p.pronamespace
 		WHERE n.nspname IN `+pgSchemaLiteralList(sc.schemas)+` AND p.prokind=$1
@@ -3430,11 +3465,11 @@ func (d *PostgreSQLDriver) listFunctions(ctx context.Context, conn *pgx.Conn, sc
 	defer rows.Close()
 	var stmts []string
 	for rows.Next() {
-		var schema, name, def string
-		if err := rows.Scan(&schema, &name, &def); err != nil {
+		var schema, name, args, def string
+		if err := rows.Scan(&schema, &name, &args, &def); err != nil {
 			return nil, err
 		}
-		if pgObjectExcluded(filter, kind, schema, name) {
+		if pgRoutineExcluded(filter, kind, schema, name, args) {
 			continue
 		}
 		stmts = append(stmts, strings.TrimRight(def, ";")+";")
