@@ -10,6 +10,7 @@ A Go library for migrating data between clouds — filesystems, S3-compatible ob
 - **Database TLS** — five modes from plaintext to full verification, spelled the same way on every engine, with a CA for roots the system trust store does not carry
 - **Planner-driven** — every migration resolves to an inspectable pipeline of steps before anything runs
 - **Async with progress** — poll status, bytes and per-file/per-table counters; cancel mid-flight
+- **Concurrency** — one setting for how many transfers run at once: rsync processes, objects and parts, restore connections; each narrowed to what its endpoint allows and reported back
 - **Inspection** — scan a path, a bucket prefix or a schema without transferring anything
 - **PostgreSQL schemas** — migrate a whole database or pick schemas out of it, and rename them on the way
 - **Character sets** — reported by inspection at every level, reproduced faithfully in the dump, and checked against the target before a migration reads anything
@@ -190,6 +191,33 @@ Both ends must run the same engine. A dump is the source engine's own dialect an
 Staging goes under the model's `StagingDir` when it is set, otherwise under `$TMPDIR/transxex-staging` (`/tmp/transxex-staging` when `TMPDIR` is unset), in a `storage/` or `dbms/` subdirectory so concurrent migrations never share a directory.
 
 `direct-pipe` streams `pg_dump` straight into `psql`, so the schema names are already in the bytes by the time they leave the source host. Selecting schemas works there, but renaming them does not — see [PostgreSQL Schemas](#postgresql-schemas).
+
+## Concurrency
+
+`Concurrency` on either model is how many transfers run at once. Zero means `DefaultConcurrency` (4); `ValidateStorage` and `ValidateDBMS` refuse anything outside 0 to `MaxConcurrency` (32) rather than clamp it. Each transfer narrows the figure to what its endpoints allow and reports the one it settled on — with the reason, when that is less than was asked — in its progress.
+
+```go
+model.Concurrency = 16
+
+h := transxex.MigrateStorageAsync(model)
+// ... once the transfer has started:
+p := h.Progress()
+fmt.Println(p.Concurrency, p.ConcurrencyNote) // "8 capped from 16: at most 8 rsync processes (ssh MaxStartups)"
+```
+
+| Transfer | What runs at once | At most |
+| --- | --- | --- |
+| filesystem (rsync) | rsync processes, each given a share of the files by size, ahead of the transfer's usual single rsync | 8, and no more than one per 50 files or per 128 MiB, whichever allows more, nor more than there are files; one rsync for a dry run or a filter rsync cannot express |
+| object storage | objects, largest first; and the parts of an object written in parts | objects × parts within 256 connections to one endpoint |
+| MySQL, MariaDB | connections the restore writes rows over, and rebuilds deferred indexes over | 16, and half the connections the target has free |
+| PostgreSQL | connections the COPY blocks load over | 16, and half the connections the target has free |
+| MongoDB | insert batches in flight; over SSH, mongorestore's `--numInsertionWorkersPerCollection` | 16 |
+| MySQL, MariaDB, PostgreSQL restored over SSH | — the CLI executes the dump in order, on one session | 1 |
+
+- **Filesystem.** The shards copy the files the filter keeps; then the transfer runs exactly as it would with a Concurrency of 1, and that run settles what a list of files cannot carry — empty directories, directories' own modes and times, symbolic links, `--delete`. A shard that fails is reported and passed over: the final run moves what it left.
+- **Object storage.** Started last, a large object runs alone at the end while every other worker is idle; started first, the small ones fill in around it.
+- **PostgreSQL.** Each COPY block is spooled beside the dump while a connection loads the one before it, so the staging directory needs room for up to as many tables' rows as connections, plus one, beyond the dump itself. With one connection nothing is spooled. A statement between the blocks waits for the loads in flight, except pg_dump's `setval`.
+- **MongoDB.** A batch is still inserted in order; the batches of a collection land in any order.
 
 ## Error Handling
 
