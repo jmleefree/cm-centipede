@@ -45,6 +45,13 @@ centipede:
     # when a value set here cannot be created or written.
     # Override with CENTIPEDE_MIGRATION_STAGING_DIR.
     stagingDir: ""
+    # How many transfers each item runs at once when a migration request names
+    # none: rsync processes for a filesystem, objects and the parts of one
+    # object for object storage, restore connections for a database. 1 to 32;
+    # 0 uses the default, 4. A migration request's concurrency overrides it.
+    # The server refuses to start on a value out of range.
+    # Override with CENTIPEDE_MIGRATION_CONCURRENCY.
+    concurrency: 0
   encryption:
     # Passphrase the connection credentials are encrypted with. Required: the
     # server will not start without it. Any passphrase of 12+ characters; it is

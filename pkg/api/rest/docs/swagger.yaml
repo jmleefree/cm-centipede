@@ -1038,6 +1038,17 @@ definitions:
     type: object
   github_com_cloud-barista_cm-centipede_pkg_api_rest_model.CreateMigrationReq:
     properties:
+      concurrency:
+        description: |-
+          Concurrency is how many transfers each item runs at once: rsync processes
+          for a filesystem, objects and the parts of one object for object storage,
+          restore connections for a database. 1 to 32; empty or 0 uses
+          centipede.migration.concurrency from the configuration, and when that is
+          unset too, 4. Each item runs at most what its environment allows and logs
+          what it ran at; a MySQL or PostgreSQL restore over an SSH tunnel runs one
+          stream whatever this says.
+        example: 8
+        type: integer
       dbmsOnFailure:
         description: |-
           DBMSOnFailure decides what happens to a DBMS target when one of its
@@ -1104,6 +1115,13 @@ definitions:
     properties:
       completedAt:
         type: string
+      concurrency:
+        description: |-
+          Concurrency is the concurrency the request named, kept as given for the
+          same reason as DBMSOnFailure. Zero means the server's configured default,
+          resolved when the migration runs. What each item actually ran at is on its
+          log row (MigrationLog.AppliedConcurrency).
+        type: integer
       createdAt:
         description: |-
           CreatedAt is indexed because it is both the list ordering key and the only
@@ -1214,6 +1232,16 @@ definitions:
     type: object
   github_com_cloud-barista_cm-centipede_pkg_api_rest_model.MigrationLog:
     properties:
+      appliedConcurrency:
+        description: |-
+          AppliedConcurrency is how many transfers this item ran at once, as
+          transx-ex settled on them, and ConcurrencyNote why that is not what the
+          migration asked for, when it is not: "capped from 16: ssh MaxSessions", or
+          a restore through a CLI over SSH, which runs one stream. Zero when the
+          item did not report it — rows written before this field existed among them.
+        type: integer
+      concurrencyNote:
+        type: string
       createdAt:
         type: string
       durationMs:
@@ -1288,6 +1316,8 @@ definitions:
     properties:
       completedAt:
         type: string
+      concurrency:
+        type: integer
       createdAt:
         type: string
       currentBytesTotal:

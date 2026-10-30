@@ -61,6 +61,8 @@ func (e *Executor) Execute(migrationID string) {
 	prop := m.Plan.TargetDataMigrationModel
 	stagingDir := ResolveStagingDir(m.StagingDir)
 	log.Info().Str("migrationID", migrationID).Str("stagingRoot", transxex.StagingRoot(stagingDir)).Msg("migration staging root")
+	concurrency := ResolveConcurrency(m.Concurrency)
+	log.Info().Str("migrationID", migrationID).Int("concurrency", concurrency).Msg("migration concurrency (0 = transx-ex default)")
 	var hasFailure bool
 
 	for i := range prop.FileSystems {
@@ -71,7 +73,7 @@ func (e *Executor) Execute(migrationID string) {
 		progressCh := make(chan ProgressEvent, 32)
 		go func() {
 			defer close(progressCh)
-			_ = MigrateFileSystem(ctx, fs, stagingDir, progressCh)
+			_ = MigrateFileSystem(ctx, fs, stagingDir, concurrency, progressCh)
 		}()
 		if e.drainProgress(m, migrationID, fs.PlanEntryID, progressCh) {
 			hasFailure = true
@@ -86,7 +88,7 @@ func (e *Executor) Execute(migrationID string) {
 		progressCh := make(chan ProgressEvent, 32)
 		go func() {
 			defer close(progressCh)
-			_ = MigrateObjectStorage(ctx, oss, stagingDir, progressCh)
+			_ = MigrateObjectStorage(ctx, oss, stagingDir, concurrency, progressCh)
 		}()
 		if e.drainProgress(m, migrationID, oss.PlanEntryID, progressCh) {
 			hasFailure = true
@@ -101,7 +103,7 @@ func (e *Executor) Execute(migrationID string) {
 		progressCh := make(chan ProgressEvent, 4)
 		go func() {
 			defer close(progressCh)
-			_ = MigrateDBMS(ctx, dbEntry, m.DBMSOnFailure, stagingDir, progressCh)
+			_ = MigrateDBMS(ctx, dbEntry, m.DBMSOnFailure, stagingDir, concurrency, progressCh)
 		}()
 		if e.drainProgress(m, migrationID, dbEntry.PlanEntryID, progressCh) {
 			hasFailure = true
@@ -158,15 +160,17 @@ func (e *Executor) drainProgress(
 		}
 		objKind, objName := failedObject(ev.Err)
 		entry := &model.MigrationLog{
-			MigrationID:      migrationID,
-			PlanEntryID:      planEntryID,
-			ItemPath:         ev.ItemPath,
-			Status:           ev.Status,
-			ErrorMsg:         errMsg,
-			FailedObjectKind: objKind,
-			FailedObjectName: objName,
-			SizeBytes:        ev.SizeBytes,
-			DurationMs:       ev.DurationMs,
+			MigrationID:        migrationID,
+			PlanEntryID:        planEntryID,
+			ItemPath:           ev.ItemPath,
+			Status:             ev.Status,
+			ErrorMsg:           errMsg,
+			FailedObjectKind:   objKind,
+			FailedObjectName:   objName,
+			SizeBytes:          ev.SizeBytes,
+			DurationMs:         ev.DurationMs,
+			AppliedConcurrency: ev.Concurrency,
+			ConcurrencyNote:    ev.ConcurrencyNote,
 		}
 		if err := dao.CreateMigrationLog(entry); err != nil {
 			log.Error().Str("migrationID", migrationID).Str("itemPath", ev.ItemPath).Err(err).Msg("execute: create log failed")
@@ -391,7 +395,9 @@ func (e *Executor) Retry(migrationID, retryMode string) (*model.Migration, error
 		// Carried over as given: an empty value still means the configured
 		// default, resolved when the retry runs.
 		StagingDir: orig.StagingDir,
-		Status:     "pending",
+		// Carried over as given, like StagingDir.
+		Concurrency: orig.Concurrency,
+		Status:      "pending",
 	}
 	if err := dao.CreateMigration(newMig); err != nil {
 		return nil, fmt.Errorf("create retry migration: %w", err)
@@ -442,6 +448,8 @@ func (e *Executor) retryRun(migrationID, retryMode string, failed *failedSet) {
 	prop := m.Plan.TargetDataMigrationModel
 	stagingDir := ResolveStagingDir(m.StagingDir)
 	log.Info().Str("migrationID", migrationID).Str("stagingRoot", transxex.StagingRoot(stagingDir)).Msg("migration staging root")
+	concurrency := ResolveConcurrency(m.Concurrency)
+	log.Info().Str("migrationID", migrationID).Int("concurrency", concurrency).Msg("migration concurrency (0 = transx-ex default)")
 	var hasFailure bool
 
 	// ── File Systems ──────────────────────────────────────────────────────────
@@ -468,7 +476,7 @@ func (e *Executor) retryRun(migrationID, retryMode string, failed *failedSet) {
 		progressCh := make(chan ProgressEvent, 32)
 		go func() {
 			defer close(progressCh)
-			_ = MigrateFileSystem(ctx, fs, stagingDir, progressCh)
+			_ = MigrateFileSystem(ctx, fs, stagingDir, concurrency, progressCh)
 		}()
 		if e.drainProgress(m, migrationID, fs.PlanEntryID, progressCh) {
 			hasFailure = true
@@ -499,7 +507,7 @@ func (e *Executor) retryRun(migrationID, retryMode string, failed *failedSet) {
 		progressCh := make(chan ProgressEvent, 32)
 		go func() {
 			defer close(progressCh)
-			_ = MigrateObjectStorage(ctx, oss, stagingDir, progressCh)
+			_ = MigrateObjectStorage(ctx, oss, stagingDir, concurrency, progressCh)
 		}()
 		if e.drainProgress(m, migrationID, oss.PlanEntryID, progressCh) {
 			hasFailure = true
@@ -605,7 +613,7 @@ func (e *Executor) retryRun(migrationID, retryMode string, failed *failedSet) {
 		progressCh := make(chan ProgressEvent, 8)
 		go func() {
 			defer close(progressCh)
-			_ = MigrateDBMS(ctx, dbEntry, m.DBMSOnFailure, stagingDir, progressCh)
+			_ = MigrateDBMS(ctx, dbEntry, m.DBMSOnFailure, stagingDir, concurrency, progressCh)
 		}()
 		if e.drainProgressWithRollback(m, migrationID, dbEntry.PlanEntryID, progressCh, rollbackOf) {
 			hasFailure = true
@@ -707,18 +715,20 @@ func (e *Executor) drainProgressWithRollback(
 		}
 		objKind, objName := failedObject(ev.Err)
 		entry := &model.MigrationLog{
-			MigrationID:      migrationID,
-			PlanEntryID:      planEntryID,
-			ItemPath:         ev.ItemPath,
-			Status:           ev.Status,
-			ErrorMsg:         errMsg,
-			FailedObjectKind: objKind,
-			FailedObjectName: objName,
-			SizeBytes:        ev.SizeBytes,
-			DurationMs:       ev.DurationMs,
-			TargetCreated:    ev.TargetCreated,
-			RollbackStatus:   rb.status,
-			RollbackErrorMsg: rb.errMsg,
+			MigrationID:        migrationID,
+			PlanEntryID:        planEntryID,
+			ItemPath:           ev.ItemPath,
+			Status:             ev.Status,
+			ErrorMsg:           errMsg,
+			FailedObjectKind:   objKind,
+			FailedObjectName:   objName,
+			SizeBytes:          ev.SizeBytes,
+			DurationMs:         ev.DurationMs,
+			AppliedConcurrency: ev.Concurrency,
+			ConcurrencyNote:    ev.ConcurrencyNote,
+			TargetCreated:      ev.TargetCreated,
+			RollbackStatus:     rb.status,
+			RollbackErrorMsg:   rb.errMsg,
 		}
 		if err := dao.CreateMigrationLog(entry); err != nil {
 			log.Error().Str("migrationID", migrationID).Str("itemPath", ev.ItemPath).Err(err).Msg("retryRun: create log failed")

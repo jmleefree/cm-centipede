@@ -129,8 +129,10 @@ func resolveTransxLoc(ref commonmodel.ConnectionRef, storageType, path string, f
 // Order and emits a ProgressEvent per folder. Returns ctx.Err() on cancellation;
 // per-folder transfer errors are reported via ProgressEvent only (continues).
 // stagingDir is the local staging root a relay or cross-storage transfer uses
-// (see ResolveStagingDir); empty leaves it to transx-ex's default.
-func MigrateFileSystem(ctx context.Context, m targetmodel.MigrationFileSystemModel, stagingDir string, progressCh chan<- ProgressEvent) error {
+// (see ResolveStagingDir); empty leaves it to transx-ex's default. concurrency
+// is how many rsync processes a folder runs at once (see ResolveConcurrency);
+// zero leaves it to transx-ex's default.
+func MigrateFileSystem(ctx context.Context, m targetmodel.MigrationFileSystemModel, stagingDir string, concurrency int, progressCh chan<- ProgressEvent) error {
 	srcSSH, err := ResolveSSHConfig(m.SrcConnection)
 	if err != nil {
 		return fmt.Errorf("resolve src connection: %w", err)
@@ -189,11 +191,12 @@ func MigrateFileSystem(ctx context.Context, m targetmodel.MigrationFileSystemMod
 			continue
 		}
 
-		movedBytes, transferErr := runStorageTransfer(ctx, transxex.StorageMigrationModel{
+		movedBytes, conc, transferErr := runStorageTransfer(ctx, transxex.StorageMigrationModel{
 			Source:      srcLoc,
 			Destination: dstLoc,
 			Strategy:    strategy,
 			StagingDir:  stagingDir,
+			Concurrency: concurrency,
 		}, folder.SrcPath, progressCh)
 		durationMs := time.Since(start).Milliseconds()
 
@@ -208,11 +211,13 @@ func MigrateFileSystem(ctx context.Context, m targetmodel.MigrationFileSystemMod
 		}
 
 		progressCh <- ProgressEvent{
-			ItemPath:   folder.SrcPath,
-			Status:     status,
-			SizeBytes:  movedBytes,
-			DurationMs: durationMs,
-			Err:        transferErr,
+			ItemPath:        folder.SrcPath,
+			Status:          status,
+			SizeBytes:       movedBytes,
+			DurationMs:      durationMs,
+			Concurrency:     conc.n,
+			ConcurrencyNote: conc.note,
+			Err:             transferErr,
 		}
 	}
 

@@ -19,7 +19,12 @@ import (
 	"github.com/cloud-barista/cm-centipede/pkg/connsec"
 )
 
-const defaultObjectConcurrency = 4
+// defaultObjectConcurrency is how many buckets of one entry move at once. One:
+// each bucket already moves as many objects at once as the migration's
+// Concurrency, and buckets side by side would multiply it — a request for 16
+// running 48 over three buckets, with the load on the source and on Spider or
+// Tumblebug that comes with them.
+const defaultObjectConcurrency = 1
 
 // ToMinioS3Config maps a honeybee ObjectStorage config to a transx S3MinioConfig.
 //
@@ -391,12 +396,13 @@ func TargetBucketExists(dst commonmodel.ConnectionRef, bucketPath string) (bool,
 // storage source to the destination. The destination is another bucket (S3→S3) or,
 // when m.DstType is filesystem, an SSH filesystem path (objectstorage→filesystem
 // cross-storage; transx handles the S3→local→ssh relay). Processes buckets in
-// ascending Order. Up to defaultObjectConcurrency buckets are transferred
-// concurrently. Emits a ProgressEvent per bucket. Returns ctx.Err() on
+// ascending Order, defaultObjectConcurrency (one) at a time. Emits a ProgressEvent per bucket. Returns ctx.Err() on
 // cancellation; per-bucket transfer errors are reported via ProgressEvent only.
 // stagingDir is the local staging root a relay or cross-storage transfer uses
-// (see ResolveStagingDir); empty leaves it to transx-ex's default.
-func MigrateObjectStorage(ctx context.Context, m targetmodel.MigrationObjectStorageModel, stagingDir string, progressCh chan<- ProgressEvent) error {
+// (see ResolveStagingDir); empty leaves it to transx-ex's default. concurrency
+// is how many objects, and parts of one, a bucket moves at once (see
+// ResolveConcurrency); zero leaves it to transx-ex's default.
+func MigrateObjectStorage(ctx context.Context, m targetmodel.MigrationObjectStorageModel, stagingDir string, concurrency int, progressCh chan<- ProgressEvent) error {
 	dstType := m.DstType
 	if dstType == "" {
 		dstType = commonmodel.StorageTypeObjectStorage
@@ -419,6 +425,7 @@ func MigrateObjectStorage(ctx context.Context, m targetmodel.MigrationObjectStor
 		srcPath    string
 		durationMs int64
 		bytes      int64
+		conc       concurrencyReport
 		err        error
 	}
 
@@ -465,17 +472,19 @@ func MigrateObjectStorage(ctx context.Context, m targetmodel.MigrationObjectStor
 				return
 			}
 
-			movedBytes, transferErr := runStorageTransfer(ctx, transxex.StorageMigrationModel{
+			movedBytes, conc, transferErr := runStorageTransfer(ctx, transxex.StorageMigrationModel{
 				Source:      srcLoc,
 				Destination: dstLoc,
 				Strategy:    strategy,
 				StagingDir:  stagingDir,
+				Concurrency: concurrency,
 			}, bucket.SrcPath, progressCh)
 
 			resultCh <- result{
 				srcPath:    bucket.SrcPath,
 				durationMs: time.Since(start).Milliseconds(),
 				bytes:      movedBytes,
+				conc:       conc,
 				err:        transferErr,
 			}
 		}(b)
@@ -496,11 +505,13 @@ func MigrateObjectStorage(ctx context.Context, m targetmodel.MigrationObjectStor
 				Msg("object storage bucket transfer failed")
 		}
 		progressCh <- ProgressEvent{
-			ItemPath:   r.srcPath,
-			Status:     status,
-			SizeBytes:  r.bytes,
-			DurationMs: r.durationMs,
-			Err:        r.err,
+			ItemPath:        r.srcPath,
+			Status:          status,
+			SizeBytes:       r.bytes,
+			DurationMs:      r.durationMs,
+			Concurrency:     r.conc.n,
+			ConcurrencyNote: r.conc.note,
+			Err:             r.err,
 		}
 	}
 

@@ -1936,6 +1936,11 @@
                 "plan"
             ],
             "properties": {
+                "concurrency": {
+                    "description": "Concurrency is how many transfers each item runs at once: rsync processes\nfor a filesystem, objects and the parts of one object for object storage,\nrestore connections for a database. 1 to 32; empty or 0 uses\ncentipede.migration.concurrency from the configuration, and when that is\nunset too, 4. Each item runs at most what its environment allows and logs\nwhat it ran at; a MySQL or PostgreSQL restore over an SSH tunnel runs one\nstream whatever this says.",
+                    "type": "integer",
+                    "example": 8
+                },
                 "dbmsOnFailure": {
                     "description": "DBMSOnFailure decides what happens to a DBMS target when one of its\ndatabase items fails. It is named for the DBMS domain because only that\ndomain has an undo step: a filesystem or object storage transfer leaves\nwhatever it had already written, with or without this field.\n\n\"cleanup\" (the default) undoes the failed item. \"keep\" leaves it in place\nfor inspection — useful when the failure is in the data rather than in the\nconnection, since cleanup destroys the evidence.\n\nCancellation is not a failure and always cleans up, whatever this says.",
                     "type": "string",
@@ -2009,6 +2014,10 @@
             "properties": {
                 "completedAt": {
                     "type": "string"
+                },
+                "concurrency": {
+                    "description": "Concurrency is the concurrency the request named, kept as given for the\nsame reason as DBMSOnFailure. Zero means the server's configured default,\nresolved when the migration runs. What each item actually ran at is on its\nlog row (MigrationLog.AppliedConcurrency).",
+                    "type": "integer"
                 },
                 "createdAt": {
                     "description": "CreatedAt is indexed because it is both the list ordering key and the only\ncolumn the date filters compare against: without the index every list call\nis a full scan plus a sort.",
@@ -2115,6 +2124,13 @@
         "github_com_cloud-barista_cm-centipede_pkg_api_rest_model.MigrationLog": {
             "type": "object",
             "properties": {
+                "appliedConcurrency": {
+                    "description": "AppliedConcurrency is how many transfers this item ran at once, as\ntransx-ex settled on them, and ConcurrencyNote why that is not what the\nmigration asked for, when it is not: \"capped from 16: ssh MaxSessions\", or\na restore through a CLI over SSH, which runs one stream. Zero when the\nitem did not report it — rows written before this field existed among them.",
+                    "type": "integer"
+                },
+                "concurrencyNote": {
+                    "type": "string"
+                },
                 "createdAt": {
                     "type": "string"
                 },
@@ -2169,6 +2185,9 @@
             "properties": {
                 "completedAt": {
                     "type": "string"
+                },
+                "concurrency": {
+                    "type": "integer"
                 },
                 "createdAt": {
                     "type": "string"

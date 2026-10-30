@@ -35,6 +35,12 @@ type Migration struct {
 	// resolved when the migration runs.
 	StagingDir string `gorm:"column:staging_dir" json:"stagingDir,omitempty"`
 
+	// Concurrency is the concurrency the request named, kept as given for the
+	// same reason as DBMSOnFailure. Zero means the server's configured default,
+	// resolved when the migration runs. What each item actually ran at is on its
+	// log row (MigrationLog.AppliedConcurrency).
+	Concurrency int `gorm:"column:concurrency" json:"concurrency,omitempty"`
+
 	Status        string `gorm:"column:status"         json:"status"`
 	StatusMessage string `gorm:"column:status_message" json:"statusMessage,omitempty"`
 
@@ -155,6 +161,14 @@ type MigrationLog struct {
 	RollbackStatus   string `gorm:"column:rollback_status"    json:"rollbackStatus,omitempty"`
 	RollbackErrorMsg string `gorm:"column:rollback_error_msg" json:"rollbackErrorMsg,omitempty"`
 
+	// AppliedConcurrency is how many transfers this item ran at once, as
+	// transx-ex settled on them, and ConcurrencyNote why that is not what the
+	// migration asked for, when it is not: "capped from 16: ssh MaxSessions", or
+	// a restore through a CLI over SSH, which runs one stream. Zero when the
+	// item did not report it — rows written before this field existed among them.
+	AppliedConcurrency int    `gorm:"column:applied_concurrency" json:"appliedConcurrency,omitempty"`
+	ConcurrencyNote    string `gorm:"column:concurrency_note"    json:"concurrencyNote,omitempty"`
+
 	CreatedAt time.Time `gorm:"column:created_at" json:"createdAt"`
 }
 
@@ -198,6 +212,15 @@ type CreateMigrationReq struct {
 	// Empty uses centipede.migration.stagingDir from the configuration, and when
 	// that is empty too, $TMPDIR/transxex-staging or /tmp/transxex-staging.
 	StagingDir string `json:"stagingDir,omitempty" example:"/data/centipede-staging"`
+
+	// Concurrency is how many transfers each item runs at once: rsync processes
+	// for a filesystem, objects and the parts of one object for object storage,
+	// restore connections for a database. 1 to 32; empty or 0 uses
+	// centipede.migration.concurrency from the configuration, and when that is
+	// unset too, 4. Each item runs at most what its environment allows and logs
+	// what it ran at; a MySQL or PostgreSQL restore over an SSH tunnel runs one
+	// stream whatever this says.
+	Concurrency int `json:"concurrency,omitempty" example:"8"`
 }
 
 // RetryReq is the optional request body for POST /centipede/migration/{id}/retry.
@@ -249,6 +272,7 @@ type MigrationSummary struct {
 
 	DBMSOnFailure string `json:"dbmsOnFailure,omitempty"`
 	StagingDir    string `json:"stagingDir,omitempty"`
+	Concurrency   int    `json:"concurrency,omitempty"`
 
 	Status        string `json:"status"`
 	StatusMessage string `json:"statusMessage,omitempty"`
@@ -300,6 +324,7 @@ func NewMigrationSummary(m *Migration) MigrationSummary {
 		},
 		DBMSOnFailure:     m.DBMSOnFailure,
 		StagingDir:        m.StagingDir,
+		Concurrency:       m.Concurrency,
 		Status:            m.Status,
 		StatusMessage:     m.StatusMessage,
 		TotalItems:        m.TotalItems,

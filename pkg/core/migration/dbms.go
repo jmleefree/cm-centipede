@@ -485,11 +485,13 @@ func createOptionFrom(dbmsType string, src *transxex.DBMSInfo) *transxex.CreateD
 // does not validate on its own — and any violation is reported as a failed item.
 //
 // stagingDir is the local staging root a dump is written under (see
-// ResolveStagingDir); empty leaves it to transx-ex's default.
+// ResolveStagingDir); empty leaves it to transx-ex's default. concurrency is how
+// many connections a restore writes over at once (see ResolveConcurrency); zero
+// leaves it to transx-ex's default.
 //
 // Returns ctx.Err() on cancellation; per-item errors are reported through
 // progressCh and do not stop the remaining items.
-func MigrateDBMS(ctx context.Context, m targetmodel.MigrationDBModel, onFailure, stagingDir string, progressCh chan<- ProgressEvent) error {
+func MigrateDBMS(ctx context.Context, m targetmodel.MigrationDBModel, onFailure, stagingDir string, concurrency int, progressCh chan<- ProgressEvent) error {
 	dbType := string(m.DBType)
 
 	dbs := make([]targetmodel.DBMigrationInfo, len(m.Databases))
@@ -508,7 +510,7 @@ func MigrateDBMS(ctx context.Context, m targetmodel.MigrationDBModel, onFailure,
 		default:
 		}
 
-		if err := migrateOneDatabase(ctx, m, d, dbType, onFailure, stagingDir, progressCh); err != nil {
+		if err := migrateOneDatabase(ctx, m, d, dbType, onFailure, stagingDir, concurrency, progressCh); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -527,6 +529,7 @@ func migrateOneDatabase(
 	dbType string,
 	onFailure string,
 	stagingDir string,
+	concurrency int,
 	progressCh chan<- ProgressEvent,
 ) error {
 	itemPath := fmt.Sprintf("%s/%s", dbType, d.SrcName)
@@ -594,6 +597,7 @@ func migrateOneDatabase(
 		// for the object-level rollback to do; the two paths are exclusive.
 		RollbackOnFailure: !created && !keep,
 		StagingDir:        stagingDir,
+		Concurrency:       concurrency,
 	}
 
 	if err := transxex.ValidateDBMS(dmm); err != nil {
@@ -674,15 +678,18 @@ func migrateOneDatabase(
 					dropIfOwned(m.DstConnection, dstLoc, created, itemPath)
 				}
 			}
+			// What the dump actually wrote, read from the handle one last time:
+			// the ticks were observations, this is the item's figure.
+			p := handle.Progress()
 			progressCh <- ProgressEvent{
-				ItemPath:      itemPath,
-				Status:        status,
-				DurationMs:    time.Since(start).Milliseconds(),
-				TargetCreated: created,
-				Err:           migErr,
-				// What the dump actually wrote, read from the handle one last
-				// time: the ticks were observations, this is the item's figure.
-				SizeBytes: handle.Progress().BytesTransferred,
+				ItemPath:        itemPath,
+				Status:          status,
+				DurationMs:      time.Since(start).Milliseconds(),
+				TargetCreated:   created,
+				Err:             migErr,
+				SizeBytes:       p.BytesTransferred,
+				Concurrency:     p.Concurrency,
+				ConcurrencyNote: p.ConcurrencyNote,
 			}
 			return migErr
 		}
