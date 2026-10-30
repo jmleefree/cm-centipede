@@ -371,6 +371,22 @@ func ResolveObjectStorageLoc(ref commonmodel.ConnectionRef, bucketPath string, f
 	}
 }
 
+// TargetBucketExists reports whether the bucket an object storage destination
+// writes into is already there. bucketPath is the DstPath: its first segment is
+// the bucket.
+//
+// Neither centipede nor transx-ex creates a bucket, so the bucket has to be made
+// on the provider first. A false result with a nil error means the store said it
+// is not there; any other answer it could not give — a denied permission, an
+// unreachable endpoint, a provider with no way to ask — is an error.
+func TargetBucketExists(dst commonmodel.ConnectionRef, bucketPath string) (bool, error) {
+	loc, err := ResolveObjectStorageLoc(dst, bucketPath, nil)
+	if err != nil {
+		return false, err
+	}
+	return transxex.BucketExists(loc)
+}
+
 // MigrateObjectStorage transfers each ObjectMigrationInfo bucket from an object-
 // storage source to the destination. The destination is another bucket (S3→S3) or,
 // when m.DstType is filesystem, an SSH filesystem path (objectstorage→filesystem

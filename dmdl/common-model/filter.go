@@ -151,6 +151,11 @@ type PgSchemaMapping struct {
 //
 // SrcName must match an entry in the source model exactly. When DstName is
 // empty the source name is used as-is on the target.
+//
+// An object storage target's bucket — the first segment of DstName, or of
+// SrcName when DstName is empty — must already exist: nothing creates it, and
+// the plan is refused when the store says it is not there. A cm-beetle target
+// is exempt, its bucket being the osId's.
 type TargetMapping struct {
 	SrcName string `json:"srcName" validate:"required"`
 	DstName string `json:"dstName,omitempty"`

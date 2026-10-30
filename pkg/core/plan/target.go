@@ -201,6 +201,36 @@ func validateDBMSTargetReachable(dstRef commonmodel.ConnectionRef, dstLoc transx
 	return nil
 }
 
+// validateObjectStorageTargetReachable checks, at plan time, that the bucket an
+// object storage destination writes into exists. Neither centipede nor transx-ex
+// creates one — the bucket is provisioned on the provider first, onprem and CSP
+// alike — so a missing bucket would otherwise surface only as NoSuchBucket once
+// the transfer had started.
+//
+// Only the store's own "no such bucket" refuses the plan. A check that cannot be
+// answered is deferred to execution, as for a target database: credentials that
+// may write but not list (AWS answers HeadBucket with 403 without s3:ListBucket)
+// could still transfer.
+func validateObjectStorageTargetReachable(dstRef commonmodel.ConnectionRef, dstPath string) error {
+	// cm-beetle creates the bucket behind osId, and the first segment of
+	// DstPath is not the bucket there (see resolveObjectStorageDstPath).
+	if dstRef.Source == commonmodel.ConnectionSourceBeetleObjectStorage {
+		return nil
+	}
+
+	exists, err := migration.TargetBucketExists(dstRef, dstPath)
+	if err != nil {
+		log.Warn().Err(err).Str("dstPath", dstPath).Msg("cannot check the target bucket; deferring the check to execution")
+		return nil
+	}
+	if !exists {
+		bucket, _ := transxex.ParseBucketAndKey(dstPath)
+		return validationErr(
+			"target bucket %q does not exist; centipede does not create buckets — create it on the provider first", bucket)
+	}
+	return nil
+}
+
 // selectMigrationPath resolves the single (srcPath, dstPath) to migrate for one
 // source entry. scanRoot is the FSInfo/ObjectStorageInfo.Path (topmost folder);
 // folders are the child folder/bucket paths listed under it.
@@ -760,6 +790,11 @@ func buildFileSystemEntry(
 	// would otherwise carry the source *directory* ("/testdata") into the
 	// bucket-name position. Same treatment, same reasons.
 	dstPath = resolveObjectStorageDstPath(e.DstConnection, mapping, dstPath)
+	if dstType == kindObjectStorage {
+		if err := validateObjectStorageTargetReachable(e.DstConnection, dstPath); err != nil {
+			return targetmodel.MigrationFileSystemModel{}, err
+		}
+	}
 
 	return targetmodel.MigrationFileSystemModel{
 		PlanEntryID:   newPlanEntryID(),
@@ -834,6 +869,11 @@ func buildObjectStorageEntry(
 			"objectStorageFilter.targetMapping.srcName %q matches no bucket of this source", mapping.SrcName)
 	}
 	dstPath = resolveObjectStorageDstPath(e.DstConnection, mapping, dstPath)
+	if dstType == kindObjectStorage {
+		if err := validateObjectStorageTargetReachable(e.DstConnection, dstPath); err != nil {
+			return targetmodel.MigrationObjectStorageModel{}, err
+		}
+	}
 
 	return targetmodel.MigrationObjectStorageModel{
 		PlanEntryID:   newPlanEntryID(),
