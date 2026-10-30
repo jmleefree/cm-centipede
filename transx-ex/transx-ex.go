@@ -107,6 +107,14 @@ func InspectObjectStorage(loc StorageLocation) (*OSInspectResult, error) {
 	return storagex.InspectObjectStorage(loc)
 }
 
+// BucketExists reports whether the bucket named by loc's path exists. Nothing
+// in transx-ex creates a bucket, so a caller asks this before a transfer writes
+// into one. A false result with a nil error means the store said the bucket is
+// not there; anything else it could not answer, a denied permission included,
+// is an error. CB-Spider and CB-Tumblebug locations return
+// ErrBucketCheckUnsupported.
+func BucketExists(loc StorageLocation) (bool, error) { return storagex.BucketExists(loc) }
+
 // ListFiles reads every regular file under the filesystem path at loc — path,
 // size and modification time — for checking a transfer file by file, which
 // InspectFilesystem's per-folder totals cannot do. See storagex.ListFiles.

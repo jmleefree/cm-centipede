@@ -111,7 +111,7 @@ Operations that exist in both domains carry the domain in their name; unambiguou
 | **Migrate**        | `MigrateStorage` · `MigrateStorageAsync`                | `MigrateDBMS` · `MigrateDBMSAsync`                    |
 | **Single op**      | —                                                       | `DumpDBMS` · `RestoreDBMS` · `RollbackDropDBMS`       |
 | **Database DDL**   | —                                                       | `CreateDatabase` · `DropDatabase`                     |
-| **Inspect**        | `InspectFilesystem` · `InspectObjectStorage`            | `InspectDBMS` · `InspectDBMSAll` · `ListDatabases` · `ListSchemas` · `DescribeTable` · `ServerVersion` |
+| **Inspect**        | `InspectFilesystem` · `InspectObjectStorage` · `BucketExists` | `InspectDBMS` · `InspectDBMSAll` · `ListDatabases` · `ListSchemas` · `DescribeTable` · `ServerVersion` |
 | **Plan / Validate**| `PlanStorage` · `ValidateStorage`                       | `PlanDBMS` · `ValidateDBMS` · `CheckCharset` · `CheckVersion` |
 | **Encryption**     | `EncryptStorageModel` · `DecryptStorageModel`           | —                                                     |
 | **Model**          | `StorageMigrationModel` · `StorageLocation`             | `DBMSMigrationModel` · `DBMSLocation`                 |

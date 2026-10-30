@@ -118,6 +118,14 @@ type (
 )
 
 // ============================================================================
+// Object Storage Errors
+// ============================================================================
+
+// ErrBucketCheckUnsupported is returned by BucketExists for a CB-Spider or
+// CB-Tumblebug location, which has no way to ask whether its bucket exists.
+var ErrBucketCheckUnsupported = storagex.ErrBucketCheckUnsupported
+
+// ============================================================================
 // Field Encryption Errors
 // ============================================================================
 
