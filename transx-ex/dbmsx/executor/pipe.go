@@ -44,6 +44,19 @@ type PipeExecutor struct {
 	// commands it runs; see WithLoggedCmds.
 	loggedDumpCmd    string
 	loggedRestoreCmd string
+
+	// concurrency and concurrencyNote are what Execute reports the restore
+	// runs at; see WithConcurrency.
+	concurrency     int
+	concurrencyNote string
+}
+
+// WithConcurrency sets what Execute reports the restore command runs at: the
+// planner knows it from the command it built, and the pipe only carries bytes.
+// Zero reports nothing.
+func (e *PipeExecutor) WithConcurrency(n int, note string) *PipeExecutor {
+	e.concurrency, e.concurrencyNote = n, note
+	return e
 }
 
 // WithLoggedCmds sets the commands the start of Execute logs in place of the
@@ -84,6 +97,9 @@ func (e *PipeExecutor) Execute(ctx context.Context, _, _ drvpkg.DBMSLocation) er
 		slog.String("dumpCmd", e.loggedDumpCmd),
 		slog.String("restoreCmd", e.loggedRestoreCmd),
 	)
+	if e.concurrency > 0 {
+		core.ReportConcurrency(ctx, e.concurrency, e.concurrencyNote)
+	}
 	pr, pw := io.Pipe()
 
 	// Every byte of the dump crosses this pipe, which is the only place on this

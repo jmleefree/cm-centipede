@@ -3,6 +3,7 @@ package mongodb
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,10 +15,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"golang.org/x/sync/errgroup"
 )
 
 // =============================================================================
@@ -434,6 +437,44 @@ func (d *MongoDBDriver) restoreViaDriver(ctx context.Context, loc base.DBMSLocat
 	})
 	defer stopCount()
 
+	// The batches go out over as many inserts at once as the migration's
+	// Concurrency, within what a restore may open. The reader runs ahead by
+	// that many and no more, so that many batches are all memory holds. Inside
+	// a batch the insert stays ordered (see insertDocuments); the batches of a
+	// collection land in any order, which its documents do not depend on.
+	workers, note := base.RestoreConnections(ctx, -1)
+	base.ReportConcurrency(ctx, workers, note)
+	readCtx, stopRead := context.WithCancel(ctx)
+	defer stopRead()
+	g, gctx := errgroup.WithContext(readCtx)
+	g.SetLimit(workers)
+
+	// A collection is reported done once its last batch has landed, not when
+	// the reader moves past it.
+	var (
+		mu      sync.Mutex
+		pending = map[string]int{}  // batches in flight, per collection
+		closed  = map[string]bool{} // collections the reader has moved past
+	)
+	settle := func(name string) { // mu held
+		if pending[name] == 0 && closed[name] {
+			delete(pending, name)
+			delete(closed, name)
+			if notify != nil {
+				notify(name)
+			}
+		}
+	}
+	closeCollection := func(name string) {
+		if name == "" {
+			return
+		}
+		mu.Lock()
+		closed[name] = true
+		settle(name)
+		mu.Unlock()
+	}
+
 	// The dump is read as it is restored: the schema, then the documents a
 	// batch at a time. Reading it whole held the database in memory twice
 	// over — the file and what it decoded to — and a collection a third time
@@ -451,16 +492,34 @@ func (d *MongoDBDriver) restoreViaDriver(ctx context.Context, loc base.DBMSLocat
 		if len(batch) == 0 {
 			return nil
 		}
-		if err := d.insertDocuments(ctx, db, coll, batch); err != nil {
-			return base.Obj{
-				Kind: base.ObjectKindCollection, Owner: loc.Database, Name: coll,
-			}.Fail(base.ActionWriteRows, err)
+		if err := gctx.Err(); err != nil {
+			return err // a batch has failed; g.Wait says which
 		}
 		// The bytes are the dump's, up to where the decoder has read.
 		off := dec.InputOffset()
-		progress.Statement(int(off-reported), int64(len(batch)), coll)
+		docs, name, n := batch, coll, int(off-reported)
 		reported = off
-		batch, batchBytes = batch[:0], 0
+		batch, batchBytes = nil, 0
+
+		mu.Lock()
+		pending[name]++
+		mu.Unlock()
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err
+			}
+			if err := d.insertDocuments(gctx, db, name, docs); err != nil {
+				return base.Obj{
+					Kind: base.ObjectKindCollection, Owner: loc.Database, Name: name,
+				}.Fail(base.ActionWriteRows, err)
+			}
+			progress.Statement(n, int64(len(docs)), "")
+			mu.Lock()
+			pending[name]--
+			settle(name)
+			mu.Unlock()
+			return nil
+		})
 		return nil
 	}
 	err = eachMongoDump(dec,
@@ -473,10 +532,11 @@ func (d *MongoDBDriver) restoreViaDriver(ctx context.Context, loc base.DBMSLocat
 				if err := flush(); err != nil {
 					return err
 				}
-				if coll != "" && notify != nil {
-					notify(coll)
-				}
+				closeCollection(coll)
 				coll = name
+				// The collection count advances in the dump's order, here,
+				// rather than as the batches land out of it.
+				progress.Statement(0, 0, name)
 			}
 			batch = append(batch, doc)
 			batchBytes += len(doc)
@@ -485,14 +545,19 @@ func (d *MongoDBDriver) restoreViaDriver(ctx context.Context, loc base.DBMSLocat
 			}
 			return nil
 		})
+	if err == nil {
+		err = flush()
+	}
+	if err != nil {
+		stopRead() // nothing more is coming: the batches in flight need not finish
+	}
+	closeCollection(coll)
+	// A failed batch is the cause, ahead of the reader stopping for it.
+	if werr := g.Wait(); werr != nil {
+		return werr
+	}
 	if err != nil {
 		return err
-	}
-	if err := flush(); err != nil {
-		return err
-	}
-	if coll != "" && notify != nil {
-		notify(coll)
 	}
 	progress.Finish()
 	return d.restoreIndexesViaDriver(ctx, db, loc, indexes)
@@ -802,15 +867,21 @@ func (d *MongoDBDriver) restoreViaSSH(ctx context.Context, loc base.DBMSLocation
 	}
 	defer f.Close()
 
+	// mongorestore inserts each collection on as many workers as the
+	// migration's Concurrency, within what a restore may open.
+	workers, note := base.RestoreConnections(ctx, -1)
+	base.ReportConcurrency(ctx, workers, note)
+	opt := &base.RestoreOption{Workers: workers}
+
 	// The CLI on the far side runs the restore, so how much of the file has been
 	// sent is all there is to report.
-	cmd := d.BuildRestoreCmd(loc, nil)
+	cmd := d.BuildRestoreCmd(loc, opt)
 	if err := base.ExecuteViaSSH(loc.SSHTunnel.SSH, cmd, base.NewReportingReader(ctx, f), nil); err != nil {
 		return &base.OperationError{
 			Operation:   base.OperationRestore,
 			DBMSType:    base.DBMSTypeMongoDB,
 			Destination: loc.Database,
-			Command:     d.BuildRestoreCmd(base.RedactedLoc(loc), nil),
+			Command:     d.BuildRestoreCmd(base.RedactedLoc(loc), opt),
 			Output:      base.SSHStderr(err),
 			Err:         err,
 		}
@@ -886,10 +957,10 @@ func (d *MongoDBDriver) BuildRestoreCmd(loc base.DBMSLocation, opt *base.Restore
 	}
 	src := base.SourceDatabaseOpt(opt)
 	if src == "" {
-		args := d.buildMongorestoreArgs(loc.SSHTunnel, loc.Database, base.ScopeFull)
+		args := d.buildMongorestoreArgs(loc.SSHTunnel, loc.Database, base.ScopeFull, base.WorkersOpt(opt))
 		return "mongorestore " + strings.Join(args, " ")
 	}
-	args := d.buildMongorestoreArgs(loc.SSHTunnel, "", base.ScopeFull)
+	args := d.buildMongorestoreArgs(loc.SSHTunnel, "", base.ScopeFull, base.WorkersOpt(opt))
 	args = append(args, "--nsInclude="+mongoShellQuote(mongoNamespacePattern(src)))
 	if src != loc.Database {
 		args = append(args,
@@ -1981,17 +2052,19 @@ func (d *MongoDBDriver) buildMongodumpArgs(cfg *base.SSHTunnelConfig, database, 
 }
 
 // mongoRestoreWorkers is how many insertion workers mongorestore runs per
-// collection. It inserts each collection on one unless told otherwise, and one
-// batch in flight leaves the server mostly waiting on the next.
+// collection when the restore names none. It inserts each collection on one
+// unless told otherwise, and one batch in flight leaves the server mostly
+// waiting on the next.
 const mongoRestoreWorkers = 4
 
-// buildMongorestoreArgs builds the mongorestore argument list for SSH-tunnel mode.
-func (d *MongoDBDriver) buildMongorestoreArgs(cfg *base.SSHTunnelConfig, database, scope string) []string {
+// buildMongorestoreArgs builds the mongorestore argument list for SSH-tunnel
+// mode, with workers insertion workers per collection (0: mongoRestoreWorkers).
+func (d *MongoDBDriver) buildMongorestoreArgs(cfg *base.SSHTunnelConfig, database, scope string, workers int) []string {
 	uri := d.buildSSHURI(cfg, database)
 	args := []string{
 		"--uri=" + mongoShellQuote(uri),
 		"--archive",
-		"--numInsertionWorkersPerCollection=" + strconv.Itoa(mongoRestoreWorkers),
+		"--numInsertionWorkersPerCollection=" + strconv.Itoa(cmp.Or(workers, mongoRestoreWorkers)),
 	}
 	switch scope {
 	case base.ScopeSchemaOnly:

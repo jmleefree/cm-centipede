@@ -540,22 +540,26 @@ func (d *MariaDBDriver) restoreViaSQL(ctx context.Context, loc base.DBMSLocation
 
 	// The INSERTs go out over writers of their own, several at once — see
 	// MySQLDriver.restoreViaSQL.
-	writers, err := base.NewRowWriters(ctx, db, base.RestoreWriters,
+	nWriters, note := base.RestoreConnections(ctx, base.MySQLFreeConnections(ctx, conn))
+	writers, err := base.NewRowWriters(ctx, db, nWriters,
 		func(n int, rows int64) { progress.Statement(n, rows, "") },
 		func(stmt string, index int, err error) error {
 			return base.RestoreStatementError(
 				base.DBMSTypeMariaDB, loc.Database, stmt, index, progress.Statements(), err)
 		})
 	if err != nil {
-		logger.Info("mariadb restore writes rows on one connection", "database", loc.Database, "err", err.Error())
+		logger.Warn("mariadb restore writes rows on one connection", "database", loc.Database, "err", err.Error())
 		writers = nil
+		nWriters, note = 1, "one connection: could not open more ("+err.Error()+")"
 	} else {
 		defer writers.Close(false) //nolint:errcheck
 	}
+	base.ReportConcurrency(ctx, nWriters, note)
 
 	// Large tables have their secondary indexes deferred — see
 	// MySQLDriver.restoreViaSQL.
 	deferred := base.NewIndexDeferrer(ctx, db, conn, loc.Database, nil, progress)
+	deferred.SetConnections(nWriters)
 	barrier := func() error {
 		if writers != nil {
 			if err := writers.Barrier(); err != nil {
@@ -678,6 +682,7 @@ func mariadbMissingKeyForFK(err error) bool {
 }
 
 func (d *MariaDBDriver) restoreViaSSH(ctx context.Context, loc base.DBMSLocation, inputPath string, notify func(string)) error {
+	base.ReportSingleStream(ctx, "one stream: the mariadb CLI over SSH runs the dump in order")
 	f, err := os.Open(inputPath)
 	if err != nil {
 		return fmt.Errorf("open input file: %w", err)

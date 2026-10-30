@@ -617,6 +617,23 @@ func (d *PostgreSQLDriver) restoreViaSQL(ctx context.Context, loc base.DBMSLocat
 		return fmt.Errorf("set check_function_bodies: %w", err)
 	}
 
+	// The COPY blocks load over as many connections as the migration's
+	// Concurrency, within what the target has free (see pgCopier). One keeps the
+	// restore as it always ran: each block streamed from the dump, nothing
+	// spooled. session collects what the copy connections must run to read the
+	// blocks as this one would.
+	nCopy, copyNote := base.RestoreConnections(ctx, pgFreeConnections(ctx, conn))
+	base.ReportConcurrency(ctx, nCopy, copyNote)
+	var (
+		copier  *pgCopier
+		session []string
+	)
+	defer func() {
+		if copier != nil {
+			copier.close()
+		}
+	}()
+
 	var matViews []string
 	// postData holds the statements that must not be in force while the rows are
 	// loaded: FK constraints, which the COPY order across tables can violate, and
@@ -673,6 +690,24 @@ func (d *PostgreSQLDriver) restoreViaSQL(ctx context.Context, loc base.DBMSLocat
 			// and the progress follows them as they go.
 			header := stmt
 			table := pgExtractCopyTable(header)
+			if nCopy > 1 && copier == nil {
+				c, cerr := d.newPgCopier(ctx, loc, nCopy, session, replicaRole, spoolDir(inputPath), progress, notify)
+				if cerr != nil {
+					logger.Warn("postgresql restore loads rows on one connection", "database", loc.Database, "err", cerr.Error())
+					nCopy = 1
+					base.ReportConcurrency(ctx, 1, "one connection: "+cerr.Error())
+				} else {
+					copier = c
+					logger.Info("postgresql restore loads rows over several connections",
+						"database", loc.Database, "connections", nCopy)
+				}
+			}
+			if copier != nil {
+				// The table count advances in the dump's order, here; the
+				// load counts its bytes and announces the table when done.
+				progress.Statement(0, 0, table)
+				return copier.copy(header, i, rows)
+			}
 			tag, err := conn.PgConn().CopyFrom(ctx, &pgCopyProgress{r: rows, p: progress, table: table}, header)
 			if err != nil {
 				// The header names the table; the rows below it would only
@@ -692,10 +727,26 @@ func (d *PostgreSQLDriver) restoreViaSQL(ctx context.Context, loc base.DBMSLocat
 				indexMemTried = true
 				indexMem = d.raiseIndexBuildMem(ctx, conn, loc)
 			}
+			// Whatever follows the rows may read them, so the loads in flight
+			// finish first; a session setting is carried to the copy
+			// connections too. A sequence's position reads no rows.
+			if copier != nil && !pgIsSetval(stmt) {
+				if err := copier.wait(); err != nil {
+					return err
+				}
+				if pgIsSessionSetting(stmt) {
+					if err := copier.execAll(stmt); err != nil {
+						return err
+					}
+				}
+			}
 			tag, err := conn.Exec(ctx, stmt)
 			if err != nil {
 				return base.RestoreStatementError(
 					base.DBMSTypePostgreSQL, loc.Database, stmt, i, progress.Statements(), err)
+			}
+			if copier == nil && pgIsSessionSetting(stmt) {
+				session = append(session, stmt)
 			}
 			progress.Statement(len(stmt), tag.RowsAffected(), "")
 		}
@@ -717,6 +768,12 @@ func (d *PostgreSQLDriver) restoreViaSQL(ctx context.Context, loc base.DBMSLocat
 		}
 		return nil
 	})
+	// A failed load is the cause, ahead of the reader stopping for it.
+	if copier != nil {
+		if werr := copier.wait(); werr != nil {
+			return werr
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -843,6 +900,7 @@ func (d *PostgreSQLDriver) setRestoreSearchPath(ctx context.Context, conn *pgx.C
 }
 
 func (d *PostgreSQLDriver) restoreViaSSH(ctx context.Context, loc base.DBMSLocation, inputPath string, notify func(string)) error {
+	base.ReportSingleStream(ctx, "one stream: psql over SSH runs the dump in order")
 	f, err := os.Open(inputPath)
 	if err != nil {
 		return fmt.Errorf("open input file: %w", err)

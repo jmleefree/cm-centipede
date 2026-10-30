@@ -562,21 +562,25 @@ func (d *MySQLDriver) restoreViaSQL(ctx context.Context, loc base.DBMSLocation, 
 	defer stopCount()
 
 	// The INSERTs go out over writers of their own, several at once; everything
-	// else stays on conn, in order (see base.RowWriters). Without the extra
+	// else stays on conn, in order (see base.RowWriters). As many as the
+	// migration's Concurrency, within what the target has free. Without the extra
 	// connections - a max_user_connections too low for them - the restore runs
 	// on conn alone, as it always did.
-	writers, err := base.NewRowWriters(ctx, db, base.RestoreWriters,
+	nWriters, note := base.RestoreConnections(ctx, base.MySQLFreeConnections(ctx, conn))
+	writers, err := base.NewRowWriters(ctx, db, nWriters,
 		func(n int, rows int64) { progress.Statement(n, rows, "") },
 		func(stmt string, index int, err error) error {
 			return base.RestoreStatementError(
 				base.DBMSTypeMySQL, loc.Database, stmt, index, progress.Statements(), err)
 		})
 	if err != nil {
-		logger.Info("mysql restore writes rows on one connection", "database", loc.Database, "err", err.Error())
+		logger.Warn("mysql restore writes rows on one connection", "database", loc.Database, "err", err.Error())
 		writers = nil
+		nWriters, note = 1, "one connection: could not open more ("+err.Error()+")"
 	} else {
 		defer writers.Close(false) //nolint:errcheck
 	}
+	base.ReportConcurrency(ctx, nWriters, note)
 
 	// The secondary indexes of a table whose rows pass a threshold are dropped
 	// as they do and rebuilt once the dump has run (see base.IndexDeferrer).
@@ -585,6 +589,7 @@ func (d *MySQLDriver) restoreViaSQL(ctx context.Context, loc base.DBMSLocation, 
 	// 8.4 checks those keys again: its connections need the restore's leave
 	// for keys on non-unique columns too.
 	deferred := base.NewIndexDeferrer(ctx, db, conn, loc.Database, []string{mysqlAllowNonStandardFK}, progress)
+	deferred.SetConnections(nWriters)
 	barrier := func() error {
 		if writers != nil {
 			if err := writers.Barrier(); err != nil {
@@ -811,6 +816,7 @@ func mysqlMissingKeyForFK(err error) bool {
 }
 
 func (d *MySQLDriver) restoreViaSSH(ctx context.Context, loc base.DBMSLocation, inputPath string, notify func(string)) error {
+	base.ReportSingleStream(ctx, "one stream: the mysql CLI over SSH runs the dump in order")
 	f, err := os.Open(inputPath)
 	if err != nil {
 		return fmt.Errorf("open input file: %w", err)

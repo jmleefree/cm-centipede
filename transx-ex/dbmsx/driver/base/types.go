@@ -132,6 +132,12 @@ type RestoreOption struct {
 	// another name has to map one to the other. The other engines' dumps carry
 	// no database name and ignore it.
 	SourceDatabase string
+
+	// Workers is how many insertion workers a restore CLI runs per collection.
+	// MongoDB only: mongorestore inserts each collection on several workers,
+	// the other engines' CLIs execute their input on one session. Zero leaves
+	// the driver's default.
+	Workers int
 }
 
 // SourceDatabaseOpt returns opt's source database, or "". It tolerates a nil
@@ -141,6 +147,14 @@ func SourceDatabaseOpt(opt *RestoreOption) string {
 		return ""
 	}
 	return opt.SourceDatabase
+}
+
+// WorkersOpt returns opt's workers, or 0. It tolerates a nil option.
+func WorkersOpt(opt *RestoreOption) int {
+	if opt == nil {
+		return 0
+	}
+	return opt.Workers
 }
 
 // =============================================================================

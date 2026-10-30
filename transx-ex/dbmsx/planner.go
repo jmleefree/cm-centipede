@@ -1,9 +1,11 @@
 package dbmsx
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
+	"github.com/cloud-barista/cm-centipede/transx-ex/core"
 	drvpkg "github.com/cloud-barista/cm-centipede/transx-ex/dbmsx/driver"
 	execpkg "github.com/cloud-barista/cm-centipede/transx-ex/dbmsx/executor"
 )
@@ -48,9 +50,17 @@ func planDirectPipe(model DBMSMigrationModel) (*Pipeline, error) {
 	}
 
 	dumpCmd := drv.BuildDumpCmd(model.Source, model.Scope)
+	// What the restore runs at. mongorestore inserts each collection on as many
+	// workers as the migration's Concurrency, within what a restore may open;
+	// the SQL engines' CLIs execute the stream in order, on one session.
+	workers, note := 1, "one stream: the restore CLI over SSH runs the dump in order"
+	if model.Destination.DBMSType == DBMSTypeMongoDB {
+		workers, note = drvpkg.RestoreConnections(core.WithConcurrency(context.Background(), model.Concurrency), -1)
+	}
+
 	// The restore is told where the stream comes from: a MongoDB archive names
 	// its collections by the source database, which the target may not share.
-	restoreOpt := &RestoreOption{SourceDatabase: model.Source.Database}
+	restoreOpt := &RestoreOption{SourceDatabase: model.Source.Database, Workers: workers}
 	restoreCmd := drv.BuildRestoreCmd(model.Destination, restoreOpt)
 
 	pipeExec := execpkg.NewPipeExecutor(
@@ -58,7 +68,8 @@ func planDirectPipe(model DBMSMigrationModel) (*Pipeline, error) {
 		restoreCmd, model.Destination.SSHTunnel.SSH,
 	).WithLoggedCmds(
 		drv.BuildDumpCmd(drvpkg.RedactedLoc(model.Source), model.Scope),
-		drv.BuildRestoreCmd(drvpkg.RedactedLoc(model.Destination), restoreOpt))
+		drv.BuildRestoreCmd(drvpkg.RedactedLoc(model.Destination), restoreOpt),
+	).WithConcurrency(workers, note)
 
 	return &Pipeline{
 		Name:     PipelineDBMSTransfer,

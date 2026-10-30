@@ -1,6 +1,7 @@
 package base
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -73,7 +74,12 @@ type IndexDeferrer struct {
 	alterProgress alterProgressSource
 	tables        map[string]*deferTable
 	pending       []*deferTable // tables holding indexes to rebuild, in the order deferred
+	connections   int           // tables rebuilt at once; 0: RestoreWriters
 }
+
+// SetConnections sets how many tables Rebuild works on at once — the restore's
+// writer count, so a rebuild asks no more of the target than the load did.
+func (d *IndexDeferrer) SetConnections(n int) { d.connections = n }
 
 type deferTable struct {
 	name            string
@@ -198,7 +204,7 @@ func (d *IndexDeferrer) drop(ctx context.Context, t *deferTable, fulltext, btree
 func (d *IndexDeferrer) Pending() bool { return len(d.pending) > 0 }
 
 // Rebuild puts back every deferred index, the tables side by side over up to
-// RestoreWriters connections of db, each table in one ALTER for its plain
+// SetConnections (else RestoreWriters) connections of db, each table in one ALTER for its plain
 // indexes and one for each FULLTEXT index - InnoDB builds those one at a time.
 // working is told of each table as its rebuild starts.
 //
@@ -230,7 +236,7 @@ func (d *IndexDeferrer) Rebuild(ctx context.Context) error {
 		mu    sync.Mutex
 		errs  []error
 		wg    sync.WaitGroup
-		slots = make(chan struct{}, RestoreWriters)
+		slots = make(chan struct{}, cmp.Or(d.connections, RestoreWriters))
 	)
 	report()
 	for _, group := range d.relatedGroups(ctx, tables) {

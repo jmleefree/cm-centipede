@@ -161,6 +161,11 @@ var TLSModes = base.TLSModes
 // See base.PgSchemaRenameOpt.
 var PgSchemaRenameOpt = base.PgSchemaRenameOpt
 
+// RestoreConnections returns how many connections a restore writes over, and
+// why that is less than the migration's Concurrency when it is.
+// See base.RestoreConnections.
+var RestoreConnections = base.RestoreConnections
+
 // RedactedLoc returns a location with its database password replaced, for
 // building a command that can be shown. See base.RedactedLoc.
 var RedactedLoc = base.RedactedLoc
