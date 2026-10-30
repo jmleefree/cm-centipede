@@ -52,14 +52,6 @@ func (e *S3Executor) Execute(ctx context.Context, source, destination DataLocati
 	}
 }
 
-// s3Concurrency is how many objects move at once in each direction.
-//
-// One at a time, a transfer of many small objects is bound by round trips, not
-// bandwidth: each object costs a presigned URL — through Tumblebug or Spider an
-// API call of its own — and a request, and the next waits for both. Several in
-// flight hide those round trips behind one another.
-const s3Concurrency = 8
-
 // s3Attempts is how many times one object is tried before the transfer fails
 // on it. A transient error — a dropped connection, a 5xx — otherwise ended a
 // transfer of thousands of objects on the one it hit.
@@ -80,9 +72,21 @@ func (e *S3Executor) upload(ctx context.Context, localPath, s3Path string, flt *
 		basePath = filepath.Dir(localPath)
 	}
 
-	progress := &s3Progress{reporter: core.ReporterFrom(ctx)}
+	// The size decides the route — an object above what the provider sends in
+	// one PUT goes in parts, where it can — and the order, largest first.
+	sizes := make([]int64, len(files))
+	for i, file := range files {
+		if info, statErr := os.Stat(file); statErr == nil {
+			sizes[i] = info.Size()
+		}
+	}
+	order := largestFirst(len(files), func(i int) int64 { return sizes[i] })
 
-	return forEachConcurrently(ctx, len(files), func(ctx context.Context, i int) error {
+	progress := &s3Progress{reporter: core.ReporterFrom(ctx)}
+	reportS3Concurrency(ctx)
+
+	return forEachConcurrently(ctx, len(order), func(ctx context.Context, k int) error {
+		i := order[k]
 		file := files[i]
 
 		// A transfer of thousands of files reports which one it stopped on,
@@ -98,13 +102,7 @@ func (e *S3Executor) upload(ctx context.Context, localPath, s3Path string, flt *
 		s3Key := filepath.Join(keyPrefix, relPath)
 		s3Key = strings.ReplaceAll(s3Key, "\\", "/") // Normalize to forward slashes
 
-		// The size decides the route: an object above what the provider sends
-		// in one PUT goes in parts, where it can.
-		var size int64
-		if info, statErr := os.Stat(file); statErr == nil {
-			size = info.Size()
-		}
-
+		size := sizes[i]
 		if mp, ok := e.Provider.(multipartUploader); ok && size > mp.singlePutLimit() {
 			// Counted part by part as they land, then finished at the size.
 			var credited int64
@@ -184,9 +182,13 @@ func (e *S3Executor) download(ctx context.Context, s3Path, localPath string, flt
 		return fmt.Errorf("failed to create local directory: %w", err)
 	}
 
-	progress := &s3Progress{reporter: core.ReporterFrom(ctx)}
+	order := largestFirst(len(matched), func(n int) int64 { return objects[matched[n]].Size })
 
-	return forEachConcurrently(ctx, len(matched), func(ctx context.Context, n int) error {
+	progress := &s3Progress{reporter: core.ReporterFrom(ctx)}
+	reportS3Concurrency(ctx)
+
+	return forEachConcurrently(ctx, len(order), func(ctx context.Context, k int) error {
+		n := order[k]
 		if skip[n] {
 			return nil
 		}
@@ -360,10 +362,13 @@ func (e *S3StreamExecutor) Execute(ctx context.Context, source, destination Data
 		}
 	}
 
-	progress := &s3Progress{reporter: core.ReporterFrom(ctx)}
+	order := largestFirst(len(matched), func(n int) int64 { return objects[matched[n]].Size })
 
-	return forEachConcurrently(ctx, len(matched), func(ctx context.Context, n int) error {
-		i := matched[n]
+	progress := &s3Progress{reporter: core.ReporterFrom(ctx)}
+	reportS3Concurrency(ctx)
+
+	return forEachConcurrently(ctx, len(order), func(ctx context.Context, k int) error {
+		i := matched[order[k]]
 		obj := objects[i]
 
 		// A transfer of thousands of objects reports which one it stopped on,
@@ -534,8 +539,8 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// forEachConcurrently calls fn for every index in [0, n), at most
-// s3Concurrency at a time.
+// forEachConcurrently calls fn for every index in [0, n), at most s3Objects at
+// a time.
 //
 // The first failure cancels the ctx the others run under, and is the error
 // returned: the ones it cut short fail with a cancellation that comes second.
@@ -543,7 +548,7 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // error, since the indices never started were not transferred.
 func forEachConcurrently(ctx context.Context, n int, fn func(ctx context.Context, i int) error) error {
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(s3Concurrency)
+	g.SetLimit(s3Objects(ctx))
 
 	for i := 0; i < n; i++ {
 		if gctx.Err() != nil {

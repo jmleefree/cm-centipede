@@ -29,10 +29,6 @@ import (
 // can lower it.
 var multipartThreshold int64 = 128 << 20
 
-// multipartConcurrency is how many parts of one object are in flight at once.
-// Under s3Concurrency objects that is up to 32 connections to one endpoint.
-const multipartConcurrency = 4
-
 // multipartUploader is implemented by a provider that can write an object
 // larger than one PUT carries, in parts through its own SDK.
 type multipartUploader interface {
@@ -90,7 +86,7 @@ func runMultipart(ctx context.Context, mp multipartUploader, key string, size in
 
 	var written atomic.Int64
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(multipartConcurrency)
+	g.SetLimit(s3Parts(ctx))
 	for i := range parts {
 		if gctx.Err() != nil {
 			break // a part has failed; the ones not yet started never will be

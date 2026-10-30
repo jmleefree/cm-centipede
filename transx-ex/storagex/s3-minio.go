@@ -63,6 +63,11 @@ func NewMinioProvider(config *MinioConfig, bucket string) (*MinioProvider, error
 		transport.DialContext = tunnel.DialContext
 		opts.Transport = transport
 		httpClient = &http.Client{Transport: transport}
+	} else if transport, err := minio.DefaultTransport(useSSL); err == nil {
+		// The SDK's own default keeps 16 idle connections per host, fewer than
+		// the parts a multipart upload can have in flight (s3MaxConnections).
+		transport.MaxIdleConnsPerHost = s3MaxConnections
+		opts.Transport = transport
 	}
 
 	client, err := minio.New(config.Endpoint, opts)
