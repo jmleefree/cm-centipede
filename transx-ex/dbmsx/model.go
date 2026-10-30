@@ -172,6 +172,11 @@ type MigrationProgress struct {
 	// those tables' indexes held back, "rebuilding indexes" once it builds them.
 	// Empty when there is nothing more to say.
 	Phase string `json:"phase,omitempty"`
+	// Concurrency is how many connections the restore wrote over, as it settled
+	// on them, and ConcurrencyNote why that is not what the model asked for,
+	// when it is not. Zero until the restore reports it.
+	Concurrency     int    `json:"concurrency,omitempty"`
+	ConcurrencyNote string `json:"concurrencyNote,omitempty"`
 }
 
 // The accessors below satisfy core.Progress, which is how core.Handle keeps
@@ -228,6 +233,12 @@ type DBMSMigrationModel struct {
 	// default, $TMPDIR/transxex-staging or /tmp/transxex-staging. It has no
 	// effect on an SSH-to-SSH pipe, which stages nothing.
 	StagingDir string `json:"stagingDir,omitempty"`
+
+	// Concurrency is how many connections a restore writes over at once. Zero
+	// means the default, 4; the most is 32. A restore runs at most what the
+	// target allows and reports what it ran at in MigrationProgress; a restore
+	// through a CLI over SSH runs one stream whatever this says.
+	Concurrency int `json:"concurrency,omitempty"`
 }
 
 // =============================================================================
@@ -260,6 +271,9 @@ func Validate(model DBMSMigrationModel) error {
 		default:
 			return fmt.Errorf("scope %q is invalid: must be one of schema-only, data-only, full", model.Scope)
 		}
+	}
+	if err := core.ValidateConcurrency(model.Concurrency); err != nil {
+		return err
 	}
 	return validateCrossLocation(model.Source, model.Destination)
 }

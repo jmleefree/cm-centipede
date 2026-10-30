@@ -274,6 +274,18 @@ const (
 // StagingRoot returns the local directory both domains stage data under.
 var StagingRoot = core.StagingRoot
 
+// Concurrency bounds, for a caller that checks a request before it builds a
+// model: zero means DefaultConcurrency, and Validate refuses anything outside 0
+// to MaxConcurrency.
+const (
+	DefaultConcurrency = core.DefaultConcurrency
+	MaxConcurrency     = core.MaxConcurrency
+)
+
+// ValidateConcurrency checks a requested Concurrency as both domains' Validate
+// do: zero, or 1 to MaxConcurrency.
+var ValidateConcurrency = core.ValidateConcurrency
+
 // ============================================================================
 // Field Encryption (storage domain only)
 // ============================================================================

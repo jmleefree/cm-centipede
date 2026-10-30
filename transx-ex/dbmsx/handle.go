@@ -222,6 +222,12 @@ func (h *MigrationHandle) migrateViaPipe(dmm DBMSMigrationModel) error {
 	// The total replaces rather than adds: the pipe reports its own running total,
 	// and this is a single-step pipeline, so there is no earlier step to carry.
 	ctx := core.WithReporter(h.Context(), core.ReporterFunc(func(u core.Update) {
+		if u.Concurrency > 0 {
+			h.updateProgress(func(p *MigrationProgress) {
+				p.Concurrency, p.ConcurrencyNote = u.Concurrency, u.ConcurrencyNote
+			})
+			return
+		}
 		if u.Bytes < 0 {
 			return
 		}
@@ -413,6 +419,11 @@ func (h *MigrationHandle) restoreContext() context.Context {
 			}
 			if u.UnitsTotal > 0 {
 				p.TablesFinished, p.TablesTotal = u.Units, u.UnitsTotal
+			}
+			if u.Concurrency > 0 {
+				// A report of its own: it carries no phase, and must not clear one.
+				p.Concurrency, p.ConcurrencyNote = u.Concurrency, u.ConcurrencyNote
+				return
 			}
 			if u.Item != "" {
 				p.CurrentTable = u.Item

@@ -33,6 +33,11 @@ import "context"
 // a restore holding indexes back until the rows are in, then building them. A
 // reporter that has phases sends its current one in every update, so unlike
 // Item an empty Phase means "none now", not "no news".
+//
+// Concurrency is how many transfers the step runs at once, and ConcurrencyNote
+// why that is not what the migration asked for, when it is not. Both are sent
+// once, by ReportConcurrency; zero means "not reported", and a consumer keeps
+// the last figure it saw.
 type Update struct {
 	Step  int
 	Steps int
@@ -45,6 +50,9 @@ type Update struct {
 	UnitsTotal int
 
 	Phase string
+
+	Concurrency     int
+	ConcurrencyNote string
 }
 
 // Reporter receives observations from inside a transfer.

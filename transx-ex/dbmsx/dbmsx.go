@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/cloud-barista/cm-centipede/transx-ex/core"
 	drvpkg "github.com/cloud-barista/cm-centipede/transx-ex/dbmsx/driver"
 )
 
@@ -23,7 +24,7 @@ func MigrateData(dmm DBMSMigrationModel) error {
 		slog.String("database", dmm.Destination.Database),
 		slog.String("scope", dmm.Scope),
 	)
-	ctx := context.Background()
+	ctx := core.WithConcurrency(context.Background(), dmm.Concurrency)
 
 	// Validate before touching the destination. Plan validates too, but it runs
 	// after PrepareTarget and CheckTargetEmpty — an infeasible model would
@@ -79,7 +80,7 @@ func MigrateData(dmm DBMSMigrationModel) error {
 // a MigrationHandle immediately. Callers use the handle to poll progress, wait
 // for completion, or cancel the operation.
 func MigrateDataAsync(dmm DBMSMigrationModel) *MigrationHandle {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(core.WithConcurrency(context.Background(), dmm.Concurrency))
 	h := newMigrationHandle(ctx, cancel)
 	go func() {
 		h.run(dmm) //nolint:errcheck — the error is recorded in the handle, returned by Wait()

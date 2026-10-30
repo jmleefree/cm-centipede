@@ -28,7 +28,7 @@ func MigrateData(dmm DataMigrationModel) error {
 // MigrateDataAsync starts MigrateData in a background goroutine and returns a
 // handle for monitoring progress and cancellation.
 func MigrateDataAsync(dmm DataMigrationModel) *MigrationHandle {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(core.WithConcurrency(context.Background(), dmm.Concurrency))
 	h := newMigrationHandle(ctx, cancel)
 	go func() {
 		h.run(dmm) //nolint:errcheck — the error is recorded in the handle, returned by Wait()

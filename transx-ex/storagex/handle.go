@@ -35,6 +35,11 @@ type MigrationProgress struct {
 	Step       int    `json:"step,omitempty"`
 	Steps      int    `json:"steps,omitempty"`
 	ErrMessage string `json:"errMessage,omitempty"`
+	// Concurrency is how many transfers the latest step to report it ran at
+	// once, and ConcurrencyNote why that is not what the model asked for, when
+	// it is not. Zero until a step reports it.
+	Concurrency     int    `json:"concurrency,omitempty"`
+	ConcurrencyNote string `json:"concurrencyNote,omitempty"`
 }
 
 // The accessors below satisfy core.Progress, which is how core.Handle keeps
@@ -94,6 +99,9 @@ func (h *MigrationHandle) observe(u core.Update) {
 		}
 		if int(u.Files) > p.FilesTransferred {
 			p.FilesTransferred = int(u.Files)
+		}
+		if u.Concurrency > 0 {
+			p.Concurrency, p.ConcurrencyNote = u.Concurrency, u.ConcurrencyNote
 		}
 	})
 }

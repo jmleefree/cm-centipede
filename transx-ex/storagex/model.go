@@ -188,6 +188,12 @@ type DataMigrationModel struct {
 	// transfer that stages nothing.
 	StagingDir string `json:"stagingDir,omitempty"`
 
+	// Concurrency is how many transfers run at once: rsync processes for a
+	// filesystem, objects and the parts of one object for object storage. Zero
+	// means the default, 4; the most is 32. Each transfer runs at most what its
+	// environment allows and reports what it ran at in MigrationProgress.
+	Concurrency int `json:"concurrency,omitempty"`
+
 	// EncryptionKeyID indicates that sensitive fields are encrypted.
 	// Empty string means plaintext, non-empty means encrypted with the specified key.
 	// The key is one-time use and will be deleted after decryption.
@@ -373,7 +379,7 @@ func Validate(dmm DataMigrationModel) error {
 	if err := validateLocation(dmm.Destination, "destination"); err != nil {
 		return err
 	}
-	return nil
+	return core.ValidateConcurrency(dmm.Concurrency)
 }
 
 func validateLocation(loc DataLocation, context string) error {
