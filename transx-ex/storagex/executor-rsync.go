@@ -1,6 +1,7 @@
 package storagex
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -51,6 +52,7 @@ type RsyncExecutor struct {
 	AdditionalArgs   []string     // Additional rsync arguments
 
 	tempKeyFile string // Temporary key file path (for PrivateKey content)
+	filesFrom   []byte // a shard's file list, fed to rsync's stdin (see runShards)
 }
 
 // NewRsyncExecutor creates a new RsyncExecutor with automatically determined transfer mode:
@@ -103,8 +105,20 @@ func determineTransferMode(src, dst DataLocation) (TransferMode, error) {
 	}
 }
 
-// Execute performs rsync transfer from source to destination.
+// Execute performs rsync transfer from source to destination. With a
+// Concurrency above 1, rsync processes copy shares of the files first and the
+// transfer then runs as it always did (see runShards).
 func (e *RsyncExecutor) Execute(ctx context.Context, source, destination DataLocation) error {
+	if n, note := e.shardPlan(ctx, source); n > 1 {
+		ctx = e.runShards(ctx, n, note, source, destination)
+	} else {
+		core.ReportConcurrency(ctx, 1, note)
+	}
+	return e.transfer(ctx, source, destination)
+}
+
+// transfer runs one rsync from source to destination in the executor's mode.
+func (e *RsyncExecutor) transfer(ctx context.Context, source, destination DataLocation) error {
 	switch e.Mode {
 	case TransferModePull:
 		return e.executePull(ctx, source, destination)
@@ -300,6 +314,9 @@ func (e *RsyncExecutor) executeAgentForward(ctx context.Context, source, destina
 	}
 	tail := newTailBuffer(rsyncTailBytes)
 	session.Stderr = tail
+	if e.filesFrom != nil {
+		session.Stdin = bytes.NewReader(e.filesFrom)
+	}
 
 	if err := session.Start(rsyncCmd); err != nil {
 		return fmt.Errorf("rsync agent-forward: start: %w", err)
@@ -328,6 +345,9 @@ func (e *RsyncExecutor) runLocal(ctx context.Context, args []string, mode string
 	}
 	tail := newTailBuffer(rsyncTailBytes)
 	cmd.Stderr = tail
+	if e.filesFrom != nil {
+		cmd.Stdin = bytes.NewReader(e.filesFrom)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("rsync %s: start: %w", mode, err)
