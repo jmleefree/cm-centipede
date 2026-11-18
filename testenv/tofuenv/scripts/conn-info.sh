@@ -2,12 +2,12 @@
 # ==============================================================================
 # conn-info.sh — print the connection info of the prepared resources
 # ------------------------------------------------------------------------------
-#   ./scripts/conn-info.sh [aws|ncp] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]
+#   ./scripts/conn-info.sh [aws|ncp|alibaba] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]
 #
 #   Arguments:
-#     csp       : aws | ncp (default: both)
+#     csp       : aws | ncp | alibaba (default: all of them)
 #     resource  : bucket | vm | database | all (default: all)
-#                 ncp also accepts: network
+#                 ncp and alibaba also accept: network
 #     --prefix  : only the environment of that prefix (default: every prefix)
 #     --reveal  : print sensitive values (passwords, connection_uri) in clear text
 #                 (otherwise they stay masked as <sensitive>)
@@ -33,7 +33,7 @@ set -euo pipefail
 RUNNER="tofuenv-runner"
 GREEN='\033[0;32m'; RED='\033[0;31m'; CYAN='\033[0;36m'; YELLOW='\033[0;33m'; NC='\033[0m'
 
-usage() { echo "Usage: $0 [aws|ncp] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]" >&2; exit 1; }
+usage() { echo "Usage: $0 [aws|ncp|alibaba] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]" >&2; exit 1; }
 
 CSP_ARG=""
 RESOURCE="all"
@@ -48,7 +48,7 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || { echo -e "${RED}--prefix needs a value${NC}" >&2; usage; }
             PREFIX_ARG="$2"; shift ;;
         --prefix=*)                     PREFIX_ARG="${1#--prefix=}" ;;
-        aws|ncp)                        CSP_ARG="$1" ;;
+        aws|ncp|alibaba)                CSP_ARG="$1" ;;
         network|bucket|vm|database|all) RESOURCE="$1" ;;
         *) echo -e "${RED}unknown argument: $1${NC}" >&2; usage ;;
     esac
@@ -59,13 +59,13 @@ if [ "$CSP_ARG" = "aws" ] && [ "$RESOURCE" = "network" ]; then
     echo -e "${RED}aws has no network module (it uses the default VPC).${NC}" >&2; exit 1
 fi
 
-# The CSPs to look at: the one named, or both. network exists on NCP only.
+# The CSPs to look at: the one named, or all. network exists on NCP and Alibaba only.
 if [ -n "$CSP_ARG" ]; then
     CSPS="$CSP_ARG"
 elif [ "$RESOURCE" = "network" ]; then
-    CSPS="ncp"
+    CSPS="ncp alibaba"
 else
-    CSPS="aws ncp"
+    CSPS="aws ncp alibaba"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -86,15 +86,15 @@ WS_PREFIX=""
 
 # Sensitive output names per resource (revealed with -raw when --reveal is given).
 # The engine list differs per CSP: AWS serves mysql/mariadb/postgres through RDS, NCP
-# serves mysql/postgresql/mongodb as managed Cloud DB.
+# serves mysql/postgresql/mongodb as managed Cloud DB, Alibaba serves all four.
 sensitive_outputs() {
     case "$1" in
         database)
-            if [ "$CSP" = "ncp" ]; then
-                echo "db_password mysql_connection_uri postgres_connection_uri mongodb_connection_uri"
-            else
-                echo "db_password mysql_connection_uri mariadb_connection_uri postgres_connection_uri"
-            fi
+            case "$CSP" in
+                ncp)     echo "db_password mysql_connection_uri postgres_connection_uri mongodb_connection_uri" ;;
+                alibaba) echo "db_password mysql_connection_uri mariadb_connection_uri postgres_connection_uri mongodb_connection_uri" ;;
+                *)       echo "db_password mysql_connection_uri mariadb_connection_uri postgres_connection_uri" ;;
+            esac
             ;;
         # The aws VM's installed-server account, and the windows RDP password.
         vm) [ "$CSP" = "aws" ] && echo "server_password admin_password" || echo "" ;;
@@ -185,7 +185,7 @@ prefixes_of() {
 modules_of() {
     if [ "$RESOURCE" != "all" ]; then
         echo "$RESOURCE"
-    elif [ "$1" = "ncp" ]; then
+    elif [ "$1" = "ncp" ] || [ "$1" = "alibaba" ]; then
         echo "network bucket vm database"
     else
         echo "bucket vm database"
@@ -220,7 +220,7 @@ for CSP in $CSPS; do
 done
 
 if [ "$SHOWN" -eq 0 ]; then
-    what="${CSP_ARG:-aws/ncp} ${RESOURCE}"
+    what="${CSP_ARG:-aws/ncp/alibaba} ${RESOURCE}"
     if [ -n "$PREFIX_ARG" ]; then
         echo -e "${YELLOW}Nothing prepared for ${what} under prefix '${PREFIX_ARG}'.${NC}" >&2
     else

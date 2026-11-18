@@ -36,7 +36,11 @@ type Inputs struct {
 	VMKeyPath  string `json:"VMKeyPath"`
 	VMDataPath string `json:"VMDataPath"` // vm module "data_path" output; overrides config.json basePath
 	// database
-	DBUser       string `json:"DBUser"`
+	DBUser string `json:"DBUser"`
+	// MongoUser overrides DBUser for MongoDB alone. A CSP whose managed MongoDB
+	// has a fixed account - Alibaba replica sets only have root - cannot share
+	// the account name of its other engines. Empty means DBUser.
+	MongoUser    string `json:"MongoUser"`
 	DBPassword   string `json:"DBPassword"`
 	DBName       string `json:"DBName"`
 	MySQLHost    string `json:"MySQLHost"`

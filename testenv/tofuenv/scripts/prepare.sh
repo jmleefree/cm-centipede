@@ -3,8 +3,9 @@
 # prepare.sh — create resources (tofu init + validate + apply)
 # ------------------------------------------------------------------------------
 #   ./scripts/prepare.sh <csp> <resource> [--engine e1,e2] [--force]
-#     aws : bucket | vm | database
-#     ncp : bucket | vm | database
+#     aws     : bucket | vm | database
+#     ncp     : bucket | vm | database
+#     alibaba : bucket | vm | database
 #
 #   Examples:
 #     ./scripts/prepare.sh aws bucket
@@ -14,7 +15,8 @@
 #
 #   One engine at a time (database only):
 #     --engine adds the engines named to the ones the prefix already runs; those keep
-#     running. aws: mysql | mariadb | postgresql, ncp: mysql | postgresql | mongodb.
+#     running. aws: mysql | mariadb | postgresql, ncp: mysql | postgresql | mongodb,
+#     alibaba: mysql | mariadb | postgresql | mongodb.
 #     Without --engine a fresh database module gets every engine, as before. The
 #     list is worked out here and handed to tofu as TF_VAR_<csp>_db_engines (see
 #     scripts/lib/db-engines.sh); it is not a .env setting.
@@ -51,6 +53,21 @@
 #     - Managed databases take roughly 30 minutes to create.
 #     - The tofu/ncp/versions module only holds data sources for looking up engine
 #       versions, images and specs. Use ./scripts/ncp-db-versions.sh for that.
+#
+#   Alibaba notes:
+#     - tofu/alibaba/network (VPC + vSwitch + security group) is handled the same
+#       way as ncp/network: applied first whenever vm or database needs it.
+#     - The public endpoints of RDS and MongoDB are created by the database
+#       module itself; nothing has to be done in the console.
+#     - The tofu/alibaba/versions module only holds data sources for looking up
+#       zones, RDS versions and classes, and ECS types. Use
+#       ./scripts/alibaba-db-versions.sh for that.
+#     - RDS PostgreSQL needs the service-linked role AliyunServiceRoleForRdsPgsqlOnEcs
+#       (lets RDS attach network interfaces; free, once per account), or the create
+#       fails with ServiceLinkedRole.NotExist. When postgresql is to be created, it
+#       is checked here and created if missing, through the aliyun CLI in the
+#       runner. It is account-wide, so no module owns it and teardown leaves it.
+#       The RAM user needs ram:CreateServiceLinkedRole for that one call.
 # ==============================================================================
 set -euo pipefail
 
@@ -60,19 +77,22 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; NC
 usage() {
     cat >&2 <<'EOF'
 Usage: prepare.sh <csp> <resource> [--engine e1,e2] [--force]
-  aws : bucket | vm | database
-  ncp : bucket | vm | database
+  aws     : bucket | vm | database
+  ncp     : bucket | vm | database
+  alibaba : bucket | vm | database
 
   A resource that already holds state is reported and left alone; --force re-applies
   it, which is what converges a module whose previous apply stopped halfway.
 
   --engine (database only) adds just the engines named; the ones already running stay.
-    aws : mysql | mariadb | postgresql
-    ncp : mysql | postgresql | mongodb
+    aws     : mysql | mariadb | postgresql
+    ncp     : mysql | postgresql | mongodb
+    alibaba : mysql | mariadb | postgresql | mongodb
 
-  ncp/network is created automatically when vm or database needs it.
+  ncp/network and alibaba/network are created automatically when vm or database needs it.
   For AWS engine versions, instance classes and the AMI: ./scripts/aws-db-versions.sh
   For NCP engine versions, images and specs: ./scripts/ncp-db-versions.sh
+  For Alibaba zones, RDS versions and classes, ECS types: ./scripts/alibaba-db-versions.sh
 EOF
     exit 1
 }
@@ -101,8 +121,8 @@ done
 [ -z "$CSP" ] || [ -z "$RESOURCE" ] && usage
 
 case "$CSP" in
-    aws|ncp) ;;
-    *) echo "invalid csp: $CSP (supported: aws, ncp)" >&2; usage ;;
+    aws|ncp|alibaba) ;;
+    *) echo "invalid csp: $CSP (supported: aws, ncp, alibaba)" >&2; usage ;;
 esac
 
 case "$RESOURCE" in
@@ -265,17 +285,79 @@ if [ "$RESOURCE" = "bucket" ]; then
     check_bucket_name
 fi
 
-# NCP vm/database resolve the VPC, subnet and ACG by name from tofu/ncp/network,
-# so it has to exist first. It is applied here rather than exposed as a command.
-# The network lives in the same prefix's workspace, which is what keeps the by-name
-# lookups matching: the names embed the prefix the workspace is named after.
-if [ "$CSP" = "ncp" ] && { [ "$RESOURCE" = "vm" ] || [ "$RESOURCE" = "database" ]; }; then
-    if ! has_managed_state "tofu/ncp/network"; then
-        echo -e "${YELLOW}=== prerequisite: creating ncp/network (VPC + PUBLIC subnet + ACG) ===${NC}"
-        apply_module "tofu/ncp/network" no
-        echo -e "${GREEN}ncp/network ready.${NC}"
+# NCP and Alibaba vm/database resolve the VPC, subnet and security group by name
+# from tofu/<csp>/network, so it has to exist first. It is applied here rather than
+# exposed as a command. The network lives in the same prefix's workspace, which is
+# what keeps the by-name lookups matching: the names embed the prefix the workspace
+# is named after.
+if { [ "$CSP" = "ncp" ] || [ "$CSP" = "alibaba" ]; } && { [ "$RESOURCE" = "vm" ] || [ "$RESOURCE" = "database" ]; }; then
+    if ! has_managed_state "tofu/${CSP}/network"; then
+        case "$CSP" in
+            ncp)     NET_WHAT="VPC + PUBLIC subnet + ACG" ;;
+            alibaba) NET_WHAT="VPC + vSwitch + security group" ;;
+        esac
+        echo -e "${YELLOW}=== prerequisite: creating ${CSP}/network (${NET_WHAT}) ===${NC}"
+        apply_module "tofu/${CSP}/network" no
+        echo -e "${GREEN}${CSP}/network ready.${NC}"
         echo
     fi
+fi
+
+# alibaba_cli <args...> — run the Alibaba Cloud CLI in the runner with the keys
+#   from OpenBao, handed over as environment variables for this one call. Exit 3:
+#   the runner has no CLI (built before it was added), 4: OpenBao unreadable.
+alibaba_cli() {
+    local region
+    region="$( set -a; . "$ROOT_DIR/.env" 2>/dev/null; set +a; printf %s "${TF_VAR_alibaba_region:-ap-northeast-2}" )"
+    docker exec -e R="$region" "$RUNNER" bash -c '
+        set -euo pipefail
+        command -v aliyun >/dev/null 2>&1 || exit 3
+        sec="$(curl -sf -H "X-Vault-Token: ${VAULT_TOKEN:-}" http://openbao:8200/v1/secret/data/csp/alibaba)" || exit 4
+        ALIBABA_CLOUD_ACCESS_KEY_ID="$(jq -r ".data.data.ALIBABA_ACCESS_KEY_ID // empty" <<<"$sec")"
+        ALIBABA_CLOUD_ACCESS_KEY_SECRET="$(jq -r ".data.data.ALIBABA_ACCESS_KEY_SECRET // empty" <<<"$sec")"
+        export ALIBABA_CLOUD_ACCESS_KEY_ID ALIBABA_CLOUD_ACCESS_KEY_SECRET ALIBABA_CLOUD_REGION_ID="$R"
+        aliyun "$@" --RegionId "$R"
+    ' _ "$@"
+}
+
+# alibaba_pg_slr — make sure AliyunServiceRoleForRdsPgsqlOnEcs exists before RDS
+#   PostgreSQL is created; see "Alibaba notes" above. Checked first, so an account
+#   that has it is left alone and the create call needs no permission there.
+PG_SLR="AliyunServiceRoleForRdsPgsqlOnEcs"
+alibaba_pg_slr() {
+    local out rc=0 has
+    out="$(alibaba_cli rds CheckServiceLinkedRole --ServiceLinkedRole "$PG_SLR" 2>&1)" || rc=$?
+    case "$rc" in
+        0) ;;
+        3) echo -e "${RED}The runner has no Alibaba Cloud CLI (aliyun), needed to check ${PG_SLR}.${NC}" >&2
+           echo "  Rebuild it: docker compose build tofu-runner && ./scripts/up.sh" >&2
+           exit 1 ;;
+        4) echo -e "${RED}Cannot read secret/csp/alibaba from OpenBao - is it unsealed? (./scripts/up.sh)${NC}" >&2
+           exit 1 ;;
+        *) echo -e "${RED}Checking the service-linked role ${PG_SLR} failed:${NC}" >&2
+           echo "$out" | sed 's/^/  /' >&2
+           exit 1 ;;
+    esac
+    has="$(printf '%s' "$out" | jq -r '.HasServiceLinkedRole // empty' 2>/dev/null || true)"
+    if [ "$has" = "true" ]; then
+        return 0
+    fi
+    echo -e "${YELLOW}=== prerequisite: creating the service-linked role ${PG_SLR} ===${NC}"
+    echo "  RDS PostgreSQL needs it to attach network interfaces. It is free, account-wide"
+    echo "  and created once; teardown.sh leaves it in place."
+    if ! out="$(alibaba_cli rds CreateServiceLinkedRole --ServiceLinkedRole "$PG_SLR" 2>&1)"; then
+        echo -e "${RED}Creating ${PG_SLR} failed:${NC}" >&2
+        echo "$out" | sed 's/^/  /' >&2
+        echo "  The RAM user needs ram:CreateServiceLinkedRole. Or create it once in the console:" >&2
+        echo "  the RDS PostgreSQL purchase page asks to authorize it (SLR Authorization)." >&2
+        exit 1
+    fi
+    echo -e "${GREEN}${PG_SLR} created.${NC}"
+    echo
+}
+
+if [ "$CSP" = "alibaba" ] && [ "$RESOURCE" = "database" ] && db_has "$TARGET" postgres; then
+    alibaba_pg_slr
 fi
 
 echo -e "${CYAN}=== prepare: ${CSP}/${RESOURCE} (prefix ${WS_PREFIX}) ===${NC}"

@@ -19,8 +19,9 @@
 #   value handed to tofu does not change between runs that mean the same thing.
 db_all_engines() {
     case "$CSP" in
-        aws) echo "mysql mariadb postgres" ;;
-        ncp) echo "mysql postgres mongodb" ;;
+        aws)     echo "mysql mariadb postgres" ;;
+        ncp)     echo "mysql postgres mongodb" ;;
+        alibaba) echo "mysql mariadb postgres mongodb" ;;
     esac
 }
 
@@ -90,8 +91,11 @@ db_intersect() { local e out=""; for e in $1; do db_has "$2" "$e" && out="$out $
 db_state_engines() {
     local mod="$1" re
     case "$CSP" in
-        aws) re='^aws_db_instance\.(mysql|mariadb|postgres)(\[0\])?$' ;;
-        ncp) re='^ncloud_(mysql|postgresql|mongodb)\.this(\[0\])?$' ;;
+        aws)     re='^aws_db_instance\.(mysql|mariadb|postgres)(\[0\])?$' ;;
+        ncp)     re='^ncloud_(mysql|postgresql|mongodb)\.this(\[0\])?$' ;;
+        # RDS engines are alicloud_db_instance.<engine>, MongoDB is
+        # alicloud_mongodb_instance.mongodb.
+        alibaba) re='^alicloud_[a-z]+_instance\.(mysql|mariadb|postgres|mongodb)(\[0\])?$' ;;
     esac
     ws_exec bash -c '
         cd "/work/'"$mod"'" 2>/dev/null || exit 0
@@ -119,6 +123,10 @@ db_engine_targets() {
             ncp:mysql)     out="$out -target=ncloud_mysql.this -target=ncloud_access_control_group_rule.mysql" ;;
             ncp:postgres)  out="$out -target=ncloud_postgresql.this -target=ncloud_access_control_group_rule.postgresql" ;;
             ncp:mongodb)   out="$out -target=ncloud_mongodb.this -target=ncloud_access_control_group_rule.mongodb" ;;
+            # Targeting the instance destroys what depends on it (account, database,
+            # public connection) along with it.
+            alibaba:mongodb) out="$out -target=alicloud_mongodb_instance.mongodb" ;;
+            alibaba:*)       out="$out -target=alicloud_db_instance.$e" ;;
         esac
     done
     echo "${out# }"

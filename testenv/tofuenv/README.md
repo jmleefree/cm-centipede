@@ -1,7 +1,8 @@
 # cm-centipede OpenTofu-Based Migration Test Environment
 
-Create and destroy **object storage buckets, databases and VMs** on **AWS** and
-**NCP (Naver Cloud Platform)** using OpenTofu, with credentials held in OpenBao.
+Create and destroy **object storage buckets, databases and VMs** on **AWS**,
+**NCP (Naver Cloud Platform)** and **Alibaba Cloud** using OpenTofu, with credentials
+held in OpenBao.
 
 These resources exist to give cm-centipede something real to migrate. Each resource
 type is prepared and destroyed **independently** — you can create just a bucket,
@@ -15,9 +16,11 @@ just a VM, or just the databases.
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
 | aws | ✅ Ubuntu / Windows<br>(+ NFS via EFS, optional)<br>(+ servers on the VM, optional) | ✅ | ✅ | ✅ | ✅ | — |
 | ncp | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| alibaba | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 Every database in the table is a managed service. Each CSP is left with the engines it offers:
 AWS has no managed MongoDB and NCP has no managed MariaDB, so those two cells are empty.
+Alibaba offers all four (RDS for MySQL / MariaDB / PostgreSQL, ApsaraDB for MongoDB).
 
 The AWS VM has three options of its own, all part of the `vm` resource rather than
 resources of their own — see [Step 3](#step-3--prepare-resources):
@@ -44,7 +47,9 @@ cp .env.example .env && chmod 600 .env    # then change every ChangeMe: AWS keys
 ```
 
 NCP needs three extra things. See [Step 4](#step-4--ncp-only-issue-the-public-domain)
-and the [AWS vs NCP](#aws-vs-ncp-at-a-glance) table.
+and the [CSPs at a glance](#csps-at-a-glance) table. Alibaba works like AWS from the
+command line (`./scripts/prepare.sh alibaba bucket`), with a network module created for
+it automatically as on NCP.
 
 ---
 
@@ -60,7 +65,7 @@ and the [AWS vs NCP](#aws-vs-ncp-at-a-glance) table.
             |
  Step 3  Prepare           ./scripts/prepare.sh aws bucket        (or vm / database)
             |                └ prints connection info when it finishes
-            |                └ for NCP, the network module is created first (automatically)
+            |                └ for NCP and Alibaba, the network module is created first (automatically)
             |
  Step 4  Public domain     NCP managed databases only: request it once in the console,
             |              then ./scripts/ncp-db-domain.sh
@@ -70,7 +75,7 @@ and the [AWS vs NCP](#aws-vs-ncp-at-a-glance) table.
  Step 6  Connect           ./scripts/conn-info.sh                  (every environment; --prefix for one)
             |
  Step 7  Destroy           ./scripts/teardown.sh aws bucket
-            |                └ for NCP, the network module is removed once nothing needs it
+            |                └ for NCP and Alibaba, the network module is removed once nothing needs it
             |                └ ./scripts/list.sh shows what is still prepared, under every prefix
             |
  Step 8  Shut down         ./scripts/down.sh
@@ -82,21 +87,21 @@ the `vault` provider.
 
 ---
 
-## AWS vs NCP at a glance
+## CSPs at a glance
 
-| | AWS | NCP |
-|---|---|---|
-| Bucket | S3 | Object Storage |
-| VM OS | Ubuntu 22.04, or Windows Server 2022 | Ubuntu 22.04 (`TF_VAR_ncp_server_image_name`) |
-| VM login account | `ubuntu` (`Administrator` on Windows) | **`root`** |
-| Servers installed on the VM | optional: MinIO, MySQL, MariaDB, PostgreSQL, MongoDB | — |
-| MySQL / PostgreSQL | RDS | Managed Cloud DB |
-| MongoDB | **not prepared** as a managed DB (can run on the VM) | Managed Cloud DB (STAND_ALONE) |
-| MariaDB | RDS | **not prepared** |
-| Network | default VPC, nothing to do | **a VPC is required — created and destroyed automatically** |
-| Reaching a DB from outside | works immediately | **a public domain must be requested once, in the console** |
-| DB engine version format | major.minor (`8.0`) | **full version (`8.0.36`)** |
-| Managed DB preparation time | a few minutes | **about 30 minutes** |
+| | AWS | NCP | Alibaba |
+|---|---|---|---|
+| Bucket | S3 | Object Storage | OSS |
+| VM OS | Ubuntu 22.04, or Windows Server 2022 | Ubuntu 22.04 (`TF_VAR_ncp_server_image_name`) | Ubuntu 22.04 (`TF_VAR_alibaba_image_name_regex`) |
+| VM login account | `ubuntu` (`Administrator` on Windows) | **`root`** | **`root`** |
+| Servers installed on the VM | optional: MinIO, MySQL, MariaDB, PostgreSQL, MongoDB | — | — |
+| MySQL / PostgreSQL | RDS | Managed Cloud DB | ApsaraDB RDS |
+| MongoDB | **not prepared** as a managed DB (can run on the VM) | Managed Cloud DB (STAND_ALONE) | ApsaraDB for MongoDB (replica set, account **`root`**) |
+| MariaDB | RDS | **not prepared** | ApsaraDB RDS |
+| Network | default VPC, nothing to do | **a VPC is required — created and destroyed automatically** | **a VPC is required — created and destroyed automatically** |
+| Reaching a DB from outside | works immediately | **a public domain must be requested once, in the console** | works immediately (public endpoints are created by the module) |
+| DB engine version format | major.minor (`8.0`) | **full version (`8.0.36`)** | major.minor (`8.0`, `14.0`) |
+| Managed DB preparation time | a few minutes | **about 30 minutes** | RDS: a few minutes to ~20; MongoDB: 5-10 minutes |
 
 ---
 
@@ -118,9 +123,10 @@ go version                  # only needed for Step 5 (test data)
 |---|---|---|
 | AWS | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | IAM user with S3, RDS and EC2 permissions (plus EFS for the VM's optional NFS) |
 | NCP | `NCP_ACCESS_KEY`, `NCP_SECRET_KEY` | Portal > My Page > Manage Authentication Key |
+| Alibaba | `ALIBABA_ACCESS_KEY_ID`, `ALIBABA_ACCESS_KEY_SECRET` | RAM user AccessKey with OSS, ECS, VPC, RDS and MongoDB permissions |
 
-NCP Object Storage uses the same key pair as the rest of NCP — there is no separate
-S3 credential.
+NCP Object Storage and Alibaba OSS use the same key pair as the rest of their CSP —
+there is no separate S3 credential.
 
 ---
 
@@ -179,6 +185,27 @@ TF_VAR_ncp_postgres_version=14.22
 TF_VAR_ncp_mongodb_version=7.0.28
 ```
 
+For Alibaba, add:
+
+```dotenv
+# Credentials - blanked automatically once stored in OpenBao (Step 2)
+ALIBABA_ACCESS_KEY_ID=your_access_key_id
+ALIBABA_ACCESS_KEY_SECRET=your_access_key_secret
+ALIBABA_DB_PASSWORD=Cent1pede_2024    # shared by RDS and MongoDB, see below
+
+# Settings - kept as is
+TF_VAR_alibaba_region=ap-northeast-2
+TF_VAR_alibaba_zone=ap-northeast-2a   # must sell ECS, RDS and MongoDB
+TF_VAR_alibaba_name_prefix=cptf       # short for "centipede tofu"
+TF_VAR_alibaba_bucket_name=cptf-alibaba-bucket-yourname-20260804   # globally unique
+TF_VAR_alibaba_db_name=testdb
+TF_VAR_alibaba_db_username=dbadmin    # RDS only; MongoDB is always root
+```
+
+The instance types, RDS classes and engine versions in `.env.example` are starting
+values; check what the zone actually sells with `./scripts/alibaba-db-versions.sh`
+once Step 2 is done.
+
 **The name prefix** is short for **centipede tofu** and names every resource this
 environment creates (`cptf-vm`, `cptf-mysql`, `cptf-rds-sg`, `cptf-vpc`, ...), so they
 are easy to tell apart from anything else in the account. Each CSP has its own key, and
@@ -188,10 +215,12 @@ they may hold different values:
 |---|---|---|
 | `TF_VAR_aws_name_prefix` | 2-20 | An RDS identifier is capped at 63 and gets a `-postgres` suffix here |
 | `TF_VAR_ncp_name_prefix` | 2-10 | The managed MongoDB `service_name` is capped at 15, and `cptf-mongodb` is already 12 |
+| `TF_VAR_alibaba_name_prefix` | 2-20 | Kept the same as AWS; Alibaba's own name limits are far longer |
 
 Lowercase letters, digits and hyphens, starting with a letter; a violation is rejected at
 plan time. **Buckets are not covered by the prefix** — an S3 name has to be globally
-unique, so `TF_VAR_aws_bucket_name` and `TF_VAR_ncp_bucket_name` are set in full.
+unique, so `TF_VAR_aws_bucket_name`, `TF_VAR_ncp_bucket_name` and
+`TF_VAR_alibaba_bucket_name` are set in full.
 
 Keep some room below those limits: NCP login keys append a role and a random suffix on
 top of the prefix (`cptf-vm-a1b2c3`), and the longest generated name is the prefix plus
@@ -208,6 +237,7 @@ Five things reliably go wrong here:
 accounts, so common names are already taken and the apply fails with
 `BucketAlreadyExists`. Append a date or your own identifier. Lowercase letters, digits
 and hyphens only, 3-63 characters. NCP bucket names must be unique within the region.
+Alibaba OSS names are globally unique across all Alibaba Cloud accounts, like S3.
 
 **Use `dbadmin`, not `admin`, as the DB username.** PostgreSQL reserves `admin` and
 `rdsadmin`, so an apply using them fails. `dbadmin` is safe on all engines and is the
@@ -221,6 +251,17 @@ anything is prepared:
 - allowed special characters: `~ ! @ # $ % ^ * ( ) - _ = [ ] { } ; : , . < > ?`
 - forbidden: `` ` `` `&` `+` `\` `"` `'` `/` and whitespace
 - example: `Cent1pede!2024`
+
+**The Alibaba DB password rules are enforced too.** RDS and MongoDB share
+`ALIBABA_DB_PASSWORD` and apply the same rule; `up.sh` rejects a violation:
+
+- 8 to 32 characters
+- at least three of: uppercase, lowercase, digits, special characters
+- allowed special characters: `! $ ^ & * ( ) _ + - =`
+- forbidden: `@ # %` — Alibaba accepts them, but they break the MongoDB URI gendata
+  builds — and anything not listed above
+- quote it in single quotes in `.env` when it has a special character
+- example: `Cent1pede_2024`
 
 **An AWS engine version the region does not offer fails the apply.** RDS is looser than
 NCP about the format — it accepts both a prefix (`8.0`) and a full version (`8.0.42`),
@@ -248,6 +289,17 @@ forces replacement, so a partial version makes **every** subsequent plan want to
 re-create the database (about 30 minutes each time). A wrong value is caught at plan
 time, not after the apply. List the supported versions with
 `./scripts/ncp-db-versions.sh` once Step 2 is done.
+
+**An Alibaba RDS class is sold only for one combination** of engine version, edition
+(`TF_VAR_alibaba_{mysql,mariadb,postgres}_category`: `Basic` or `HighAvailability`),
+storage type and zone.
+The database module checks the class against that combination at plan time, so a
+mismatch stops before anything is created. `./scripts/alibaba-db-versions.sh` lists
+the classes that fit the values `.env` sets, and the zones that sell every service.
+MongoDB versions and classes are not in the provider's catalog, so
+`./scripts/alibaba-db-versions.sh mongodb` asks the Alibaba Cloud API for them through
+the `aliyun` CLI in the runner; they are sold per version, node count
+(`TF_VAR_alibaba_mongodb_replication_factor`), storage type and zone.
 
 Leave `VAULT_TOKEN` empty — Step 2 fills it in.
 
@@ -295,6 +347,7 @@ re-running `up.sh` is safe.
 |---|---|
 | `aws` | `bucket`, `vm`, `database` |
 | `ncp` | `bucket`, `vm`, `database` |
+| `alibaba` | `bucket`, `vm`, `database` |
 
 **Running the same command twice is safe.** A resource that already holds tofu state is
 reported and skipped, so nothing is created and nothing is charged:
@@ -321,6 +374,7 @@ engines named, comma-separated, using the same names as `gen-data.sh --engine`:
 |---|---|
 | `aws` | `mysql`, `mariadb`, `postgresql` |
 | `ncp` | `mysql`, `postgresql`, `mongodb` |
+| `alibaba` | `mysql`, `mariadb`, `postgresql`, `mongodb` |
 
 ```bash
 ./scripts/prepare.sh aws database --engine postgresql          # PostgreSQL only
@@ -485,18 +539,49 @@ NCP has no default VPC, so `vm` and `database` resolve a VPC, PUBLIC subnet and 
 whichever of the two you run first creates it, and Step 7 removes it once nothing
 needs it any more. Each prefix gets a network of its own.
 
+**Alibaba** — the same three resources, in any order:
+
+```bash
+./scripts/alibaba-db-versions.sh zones    # optional: zones selling ECS, RDS and MongoDB
+./scripts/alibaba-db-versions.sh          # optional: RDS versions and classes, ECS types, images
+./scripts/prepare.sh alibaba bucket
+./scripts/prepare.sh alibaba vm
+./scripts/prepare.sh alibaba database     # RDS MySQL + MariaDB + PostgreSQL, MongoDB (or --engine)
+```
+
+**Sizing on Alibaba** — all set in `.env`:
+
+| What | Variable | Default |
+|---|---|---|
+| VM type | `TF_VAR_alibaba_instance_type` | `ecs.t6-c1m2.large` — list with `./scripts/alibaba-db-versions.sh server` |
+| VM system disk (GB) | `TF_VAR_alibaba_vm_volume_size` | `40` (20-500). The VM's only disk; fixed at creation |
+| VM public bandwidth (Mbps) | `TF_VAR_alibaba_vm_bandwidth_out` | `10`, billed by traffic. Caps traffic out of the VM |
+| RDS edition, per engine | `TF_VAR_alibaba_{mysql,mariadb,postgres}_category` | `Basic`, `HighAvailability` (MariaDB is sold as HighAvailability only), `Basic` |
+| RDS class, per engine | `TF_VAR_alibaba_{mysql,mariadb,postgres}_instance_class` | checked at plan time — list with `./scripts/alibaba-db-versions.sh <engine>` |
+| RDS storage (GB) | `TF_VAR_alibaba_db_allocated_storage` | `20`, each RDS engine |
+| MongoDB class / storage | `TF_VAR_alibaba_mongodb_instance_class`, `_storage`, `_storage_type` | `mdb.shard.4x.large.d` (2 vCPU / 8 GB), `20`, `cloud_essd1` — list with `./scripts/alibaba-db-versions.sh mongodb` |
+| MongoDB nodes | `TF_VAR_alibaba_mongodb_replication_factor` | `3` (1, 3, 5 or 7) |
+
+As on NCP, `vm` and `database` resolve a VPC, vSwitch and security group **by name**
+from the `alibaba/network` module, which is created and removed automatically. There
+is no Step 4 for Alibaba: the RDS and MongoDB public endpoints are created by the
+database module, and access is limited by each instance's IP whitelist
+(`TF_VAR_allowed_cidr`). The MongoDB host is the replica set Primary's public address,
+and its account is always `root` — `gen-data.sh` passes it to gendata on its own.
+
 Connection info is printed automatically when an apply finishes.
 
 **How long to expect:**
 
 | Resource | Time |
 |---|---|
-| bucket (either CSP) | seconds |
-| the automatic `ncp network` step | about a minute, added to the first `ncp vm` or `ncp database` |
-| vm (either CSP) | a few minutes |
+| bucket (any CSP) | seconds |
+| the automatic `ncp network` / `alibaba network` step | about a minute, added to the first `vm` or `database` |
+| vm (any CSP) | a few minutes |
 | `aws vm` with `TF_VAR_aws_vm_servers` | about 10 minutes more on Ubuntu, 15–25 on Windows |
 | `aws database` | several minutes |
 | `ncp database` | **about 30 minutes** — do not interrupt it |
+| `alibaba database` | RDS several minutes to ~20 each, MongoDB 5–10 minutes (they are created in parallel) |
 
 The NCP managed database resources have no update path: every attribute forces
 replacement. Changing one variable re-creates the database and costs another 30
@@ -692,11 +777,11 @@ of accumulating copies. A summary of the last run is written per environment, to
 ### `conn-info.sh` — everything at once (recommended)
 
 ```
-./scripts/conn-info.sh [aws|ncp] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]
+./scripts/conn-info.sh [aws|ncp|alibaba] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]
 ```
 
 ```bash
-./scripts/conn-info.sh                                   # every environment, both CSPs, secrets masked
+./scripts/conn-info.sh                                   # every environment, every CSP, secrets masked
 ./scripts/conn-info.sh aws database                      # the DBs of every AWS environment
 ./scripts/conn-info.sh ncp --prefix cptf                 # one environment
 ./scripts/conn-info.sh ncp database --prefix cptf --reveal  # its passwords and URIs in clear text
@@ -749,7 +834,7 @@ docker exec -e TF_WORKSPACE=cptf tofuenv-runner bash -c \
 `TF_WORKSPACE` is the prefix — every module keeps one state per prefix, and without it
 tofu reads the empty `default` workspace. Replace `aws` with `ncp`, and `database` with
 `bucket`, `vm` or `network`. Drop `-raw`
-for non-sensitive outputs. Output names are the **same on both CSPs**, so anything
+for non-sensitive outputs. Output names are the **same on every CSP**, so anything
 reading them stays CSP-agnostic:
 
 | Module | Outputs |
@@ -790,17 +875,27 @@ On NCP, the same three resources — the `network` module is not one of them:
 ./scripts/teardown.sh ncp bucket
 ```
 
+On Alibaba, likewise — its `network` module is handled the same way:
+
+```bash
+./scripts/teardown.sh alibaba database
+./scripts/teardown.sh alibaba vm
+./scripts/teardown.sh alibaba bucket
+```
+
 **One database engine at a time** — `--engine` destroys just the engines named; the
 others keep running:
 
 ```bash
 ./scripts/teardown.sh aws database --engine postgresql
 ./scripts/teardown.sh ncp database --engine mongodb
+./scripts/teardown.sh alibaba database --engine mariadb
 ```
 
 - It is a targeted destroy of those engines' own resources (the instance, plus its
-  parameter group on AWS or its ACG rule on NCP). The engines that stay are not
-  re-applied, so a `.env` change made since cannot re-create them.
+  parameter group on AWS, its ACG rule on NCP, or its account, database and public
+  endpoint on Alibaba). The engines that stay are not re-applied, so a `.env` change
+  made since cannot re-create them.
 - Removing the **last** engine left destroys the whole database module — subnet group
   and security group included — exactly like a run without `--engine`.
 - OpenTofu warns that `-target` is in effect and that outputs may be incomplete — expected
@@ -808,7 +903,7 @@ others keep running:
   but clears the removed engine's `*_host` / `*_port`, so `conn-info.sh` and `gen-data.sh`
   stop seeing it.
 - Naming an engine that is not running is reported and does nothing.
-- On NCP, the `network` module stays while any engine is left.
+- On NCP and Alibaba, the `network` module stays while any engine is left.
 
 **`ncp bucket` is emptied first.** NCP's bucket resource has no `force_destroy` — the
 one `tofu/aws/bucket` sets on `aws_s3_bucket` — and the S3 API refuses to delete a
@@ -826,6 +921,10 @@ fails — you are told so and the destroy still runs: an empty bucket goes eithe
 If it comes back with `BucketNotEmpty`, empty the bucket in the console (incomplete
 multipart uploads included) and run the command again.
 
+**`alibaba bucket` is not emptied first.** `tofu/alibaba/bucket` sets `force_destroy`
+on `alicloud_oss_bucket`, as AWS does, so the destroy deletes the objects itself and no
+go is needed.
+
 A destroy that fails is **retried once, 60 seconds later** (`destroy failed — retry 1/1
 in 60s`). NCP answers some delete calls with a 500 while the resource is still being
 released, and the same call then goes through. If the retry fails too, the error is
@@ -842,10 +941,11 @@ be a no-op that still costs a full plan.
 Because only `vm` and `database` reference the VPC, the script destroys the prefix's
 `network` module for you as soon as **neither of them is left in that prefix** (a
 database with even one engine left still counts). Destroy them in either order;
-whichever goes last takes the VPC, subnet and ACG with it. While one of them is still
-prepared, you will see `Keeping ncp/network: another module still uses it.`
+whichever goes last takes the VPC, subnet and ACG with it (on Alibaba: the VPC, vSwitch
+and security group). While one of them is still prepared, you will see
+`Keeping ncp/network: another module still uses it.` (`alibaba/network` on Alibaba).
 
-If NCP has not finished releasing the servers, that final network destroy can fail.
+If the CSP has not finished releasing the servers, that final network destroy can fail.
 It is reported as a **warning**, not an error — the resource you asked for is already
 gone — and re-running the same command a few minutes later finishes the job.
 

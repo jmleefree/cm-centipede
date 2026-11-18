@@ -3,8 +3,9 @@
 # teardown.sh — delete resources (tofu destroy)
 # ------------------------------------------------------------------------------
 #   ./scripts/teardown.sh <csp> <resource> [--engine e1,e2]
-#     aws : bucket | vm | database
-#     ncp : bucket | vm | database
+#     aws     : bucket | vm | database
+#     ncp     : bucket | vm | database
+#     alibaba : bucket | vm | database
 #
 #   Examples:
 #     ./scripts/teardown.sh aws database
@@ -13,7 +14,8 @@
 #
 #   One engine at a time (database only):
 #     --engine destroys just the engines named; the others keep running untouched.
-#     aws: mysql | mariadb | postgresql, ncp: mysql | postgresql | mongodb.
+#     aws: mysql | mariadb | postgresql, ncp: mysql | postgresql | mongodb,
+#     alibaba: mysql | mariadb | postgresql | mongodb.
 #     It is a targeted destroy of those engines' own resources (see
 #     db_engine_targets in scripts/lib/db-engines.sh), not an apply of the shorter
 #     engine list: an apply would also roll any .env change into the engines that
@@ -67,6 +69,12 @@
 #       PostgreSQL/MongoDB 10 min) and does not support a timeouts block.
 #       If the wait times out the delete API call has already been sent, so
 #       simply re-running this command converges.
+#
+#   Alibaba notes:
+#     - alibaba/bucket is NOT emptied first: alicloud_oss_bucket sets
+#       force_destroy, so the destroy deletes the objects itself.
+#     - tofu/alibaba/network is destroyed automatically once neither
+#       alibaba/vm nor alibaba/database holds state, as ncp/network is.
 # ==============================================================================
 set -euo pipefail
 
@@ -76,15 +84,18 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; NC
 usage() {
     cat >&2 <<'EOF'
 Usage: teardown.sh <csp> <resource> [--engine e1,e2]
-  aws : bucket | vm | database
-  ncp : bucket | vm | database
+  aws     : bucket | vm | database
+  ncp     : bucket | vm | database
+  alibaba : bucket | vm | database
 
   --engine (database only) destroys just the engines named; the others stay.
-    aws : mysql | mariadb | postgresql
-    ncp : mysql | postgresql | mongodb
+    aws     : mysql | mariadb | postgresql
+    ncp     : mysql | postgresql | mongodb
+    alibaba : mysql | mariadb | postgresql | mongodb
   Removing the last engine destroys the whole database module.
 
-  ncp/network is destroyed automatically once neither vm nor database remains.
+  ncp/network and alibaba/network are destroyed automatically once neither vm nor
+  database remains.
 EOF
     exit 1
 }
@@ -112,8 +123,8 @@ done
 [ -z "$CSP" ] || [ -z "$RESOURCE" ] && usage
 
 case "$CSP" in
-    aws|ncp) ;;
-    *) echo "invalid csp: $CSP (supported: aws, ncp)" >&2; usage ;;
+    aws|ncp|alibaba) ;;
+    *) echo "invalid csp: $CSP (supported: aws, ncp, alibaba)" >&2; usage ;;
 esac
 
 case "$RESOURCE" in
@@ -183,7 +194,7 @@ login_keys_only() {
 }
 
 # has_csp_state <module> — true when the module still holds a resource that exists at
-#   the CSP. Used to decide whether anything still needs tofu/ncp/network: a leftover
+#   the CSP. Used to decide whether anything still needs tofu/<csp>/network: a leftover
 #   random_id or generated key file lives only in state, does not sit in the VPC, and
 #   must not keep the network alive on its own.
 has_csp_state() {
@@ -433,34 +444,35 @@ if [ "$PARTIAL" -eq 0 ]; then
     ws_drop "$MODULE"
 fi
 
-# tofu/ncp/network is only referenced by ncp/vm and ncp/database. Once neither of
-# them holds state in this prefix, nothing needs its VPC any more, so clean it up as
-# well. Other prefixes have networks of their own and are not looked at.
-if [ "$CSP" = "ncp" ] && { [ "$RESOURCE" = "vm" ] || [ "$RESOURCE" = "database" ]; }; then
-    if has_managed_state "tofu/ncp/network"; then
-        if has_csp_state "tofu/ncp/vm" || has_csp_state "tofu/ncp/database"; then
-            echo -e "${YELLOW}Keeping ncp/network: another module still uses it.${NC}"
+# tofu/<csp>/network (ncp, alibaba) is only referenced by that CSP's vm and
+# database. Once neither of them holds state in this prefix, nothing needs its VPC
+# any more, so clean it up as well. Other prefixes have networks of their own and
+# are not looked at.
+if { [ "$CSP" = "ncp" ] || [ "$CSP" = "alibaba" ]; } && { [ "$RESOURCE" = "vm" ] || [ "$RESOURCE" = "database" ]; }; then
+    if has_managed_state "tofu/${CSP}/network"; then
+        if has_csp_state "tofu/${CSP}/vm" || has_csp_state "tofu/${CSP}/database"; then
+            echo -e "${YELLOW}Keeping ${CSP}/network: another module still uses it.${NC}"
             # Guarded with if, not `cmd && echo`: under set -e a false AND-list is the
             # statement's exit status and would end the script here.
-            if has_csp_state "tofu/ncp/vm"; then
-                echo "  - ncp/vm is still prepared"
+            if has_csp_state "tofu/${CSP}/vm"; then
+                echo "  - ${CSP}/vm is still prepared"
             fi
-            if has_csp_state "tofu/ncp/database"; then
-                echo "  - ncp/database is still prepared"
+            if has_csp_state "tofu/${CSP}/database"; then
+                echo "  - ${CSP}/database is still prepared"
             fi
         else
             echo
-            echo -e "${CYAN}=== nothing uses ncp/network any more — destroying it ===${NC}"
-            # Not fatal: the requested resource is already gone, and NCP sometimes
+            echo -e "${CYAN}=== nothing uses ${CSP}/network any more — destroying it ===${NC}"
+            # Not fatal: the requested resource is already gone, and the CSP sometimes
             # needs a moment before it lets the subnet or VPC go. The error is not
             # reported twice - the warning below says what to do about it.
-            if destroy_with_retry "tofu/ncp/network" no; then
-                ws_drop "tofu/ncp/network"
-                echo -e "${GREEN}=== deleted: ncp/network (prefix ${WS_PREFIX}) ===${NC}"
+            if destroy_with_retry "tofu/${CSP}/network" no; then
+                ws_drop "tofu/${CSP}/network"
+                echo -e "${GREEN}=== deleted: ${CSP}/network (prefix ${WS_PREFIX}) ===${NC}"
             else
-                echo -e "${YELLOW}Warning: ncp/network could not be destroyed yet.${NC}" >&2
-                echo "  NCP may still be releasing the servers. Re-run this command in a few minutes:" >&2
-                echo "    ./scripts/teardown.sh ncp ${RESOURCE}" >&2
+                echo -e "${YELLOW}Warning: ${CSP}/network could not be destroyed yet.${NC}" >&2
+                echo "  The CSP may still be releasing the servers. Re-run this command in a few minutes:" >&2
+                echo "    ./scripts/teardown.sh ${CSP} ${RESOURCE}" >&2
             fi
         fi
     fi

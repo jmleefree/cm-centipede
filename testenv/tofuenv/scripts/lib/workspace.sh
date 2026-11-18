@@ -3,7 +3,7 @@
 # workspace.sh — one tofu workspace per name prefix
 # ------------------------------------------------------------------------------
 #   Sourced by every script that runs tofu against a resource module (bucket,
-#   vm, database and ncp/network). Each module keeps one state per prefix, in the
+#   vm, database and ncp/network, alibaba/network). Each module keeps one state per prefix, in the
 #   local backend's workspace layout:
 #
 #     tofu/<csp>/<module>/terraform.tfstate.d/<prefix>/terraform.tfstate
@@ -88,12 +88,18 @@ ws_current() {
 # ws_prepared — "<csp> <module> <prefix>" for every state that tracks a managed
 #   resource, across every prefix. The state files are read directly: tofu can only
 #   look at one workspace at a time, and asking it about a workspace that does not
-#   exist would create one. Data sources and leftover outputs do not count.
+#   exist would create one. Data sources, leftover outputs and managed blocks
+#   without instances do not count.
 ws_prepared() {
     docker exec "$RUNNER" bash -c '
-        managed() { jq -e "[.resources[]? | select(.mode == \"managed\")] | length > 0" "$1" >/dev/null 2>&1; }
+        # A managed block with no instances does not count: tofu leaves one behind
+        # for a count resource whose create never started (a failed apply), and
+        # nothing exists at the CSP for it.
+        managed() { jq -e "[.resources[]? | select(.mode == \"managed\" and ((.instances // []) | length) > 0)] | length > 0" "$1" >/dev/null 2>&1; }
         for dir in /work/tofu/aws/bucket /work/tofu/aws/vm /work/tofu/aws/database \
-                   /work/tofu/ncp/bucket /work/tofu/ncp/vm /work/tofu/ncp/database /work/tofu/ncp/network; do
+                   /work/tofu/ncp/bucket /work/tofu/ncp/vm /work/tofu/ncp/database /work/tofu/ncp/network \
+                   /work/tofu/alibaba/bucket /work/tofu/alibaba/vm /work/tofu/alibaba/database \
+                   /work/tofu/alibaba/network; do
             [ -d "$dir" ] || continue
             rel="${dir#/work/tofu/}"; csp="${rel%%/*}"; mod="${rel#*/}"
             for f in "$dir"/terraform.tfstate.d/*/terraform.tfstate; do

@@ -12,6 +12,7 @@
 #         (the engine is named postgresql, as cb-spider names it; the tofu
 #          outputs it is read from stay postgres_host / postgres_port)
 #     ./scripts/gen-data.sh --provider ncp --target all         # NCP resources
+#     ./scripts/gen-data.sh --provider alibaba --target all     # Alibaba resources
 #     ./scripts/gen-data.sh --target all --dry-run             # generate only, skip upload/transfer/load
 #     ./scripts/gen-data.sh --target bucket --force            # skip the existing-data check
 #     ./scripts/gen-data.sh --source vm --target database      # the DBs installed ON the aws VM
@@ -143,8 +144,8 @@ if [ "$HELP" -eq 1 ]; then
 fi
 
 case "$PROVIDER" in
-    aws|ncp) ;;
-    *) die "unknown provider '${PROVIDER}' (aws|ncp)" ;;
+    aws|ncp|alibaba) ;;
+    *) die "unknown provider '${PROVIDER}' (aws|ncp|alibaba)" ;;
 esac
 case "$SOURCE" in
     managed) ;;
@@ -255,7 +256,7 @@ vault_read() {
 
 BUCKET_NAME=""; REGION=""; ACCESS_KEY=""; SECRET_KEY=""; BUCKET_ENDPOINT=""; BUCKET_LOOKUP=""
 VM_HOST=""; VM_USER=""; VM_KEY=""; VM_PATH=""; VM_VOLUME_GB=0
-DB_USER=""; DB_PASSWORD=""; DB_NAME=""; DB_STORAGE_GB=0
+DB_USER=""; DB_PASSWORD=""; DB_NAME=""; DB_STORAGE_GB=0; MONGO_USER=""
 MYSQL_HOST=""; MYSQL_PORT=""; MARIADB_HOST=""; MARIADB_PORT=""
 PG_HOST=""; PG_PORT=""; MONGO_HOST=""; MONGO_PORT=""
 
@@ -292,8 +293,9 @@ elif want bucket; then
 
     # The CSP keys are not in .env - up.sh blanks them once they are in OpenBao.
     case "$PROVIDER" in
-        ncp) AK_KEY="NCP_ACCESS_KEY"; SK_KEY="NCP_SECRET_KEY" ;;
-        *)   AK_KEY="AWS_ACCESS_KEY_ID"; SK_KEY="AWS_SECRET_ACCESS_KEY" ;;
+        ncp)     AK_KEY="NCP_ACCESS_KEY"; SK_KEY="NCP_SECRET_KEY" ;;
+        alibaba) AK_KEY="ALIBABA_ACCESS_KEY_ID"; SK_KEY="ALIBABA_ACCESS_KEY_SECRET" ;;
+        *)       AK_KEY="AWS_ACCESS_KEY_ID"; SK_KEY="AWS_SECRET_ACCESS_KEY" ;;
     esac
     if ! ACCESS_KEY="$(vault_read "csp/${PROVIDER}" "$AK_KEY")"; then
         die "cannot read OpenBao secret/csp/${PROVIDER} at ${VAULT_ADDR}.
@@ -311,7 +313,7 @@ if want filesystem; then
     VM_USER="$(out_val "$VO" ssh_user)"
     if [ -z "$VM_USER" ]; then
         # The login account of the CSP-provided Linux images.
-        case "$PROVIDER" in ncp) VM_USER="root" ;; *) VM_USER="ubuntu" ;; esac
+        case "$PROVIDER" in ncp|alibaba) VM_USER="root" ;; *) VM_USER="ubuntu" ;; esac
     fi
     VM_KEY="$(out_val "$VO" key_file)"
     # gendata runs from its own directory, so the key path has to be absolute.
@@ -374,6 +376,9 @@ if want database && [ "$SOURCE" = "vm" ]; then
 elif want database; then
     DO="$(tofu_output database)"
     DB_USER="$(out_val "$DO" db_username)"
+    # Only a module whose MongoDB account differs from db_username publishes it
+    # (alibaba: replica sets have root only); empty leaves gendata on DBUser.
+    MONGO_USER="$(out_val "$DO" mongodb_username)"
     DB_PASSWORD="$(out_val "$DO" db_password)"
     DB_NAME="$(out_val "$DO" db_name)"
     MYSQL_HOST="$(out_val "$DO" mysql_host)";     MYSQL_PORT="$(out_val "$DO" mysql_port)"
@@ -390,9 +395,17 @@ elif want database; then
     #   ncp  none - Cloud DB storage starts small and grows on its own as data is
     #        written, so there is no allocation to measure against. 0 makes
     #        gendata skip the check, as it does for an unknown VM volume.
+    #   alibaba  the smaller of the RDS and MongoDB storage, since one figure
+    #        has to cover every engine a run may load.
     case "$PROVIDER" in
         aws) DB_STORAGE_GB="${TF_VAR_aws_db_allocated_storage:-20}" ;;
         ncp) DB_STORAGE_GB=0 ;;
+        alibaba)
+            DB_STORAGE_GB="${TF_VAR_alibaba_db_allocated_storage:-20}"
+            if [ "${TF_VAR_alibaba_mongodb_storage:-20}" -lt "$DB_STORAGE_GB" ]; then
+                DB_STORAGE_GB="${TF_VAR_alibaba_mongodb_storage:-20}"
+            fi
+            ;;
     esac
 fi
 
@@ -404,6 +417,7 @@ INPUTS="$(jq -n \
     --arg vmhost "$VM_HOST" --arg vmuser "$VM_USER" \
     --arg vmkey "$VM_KEY"   --arg vmpath "$VM_PATH" \
     --arg dbuser "$DB_USER" --arg dbpass "$DB_PASSWORD" --arg dbname "$DB_NAME" \
+    --arg mguser "$MONGO_USER" \
     --arg myh "$MYSQL_HOST"   --arg myp "$MYSQL_PORT" \
     --arg mah "$MARIADB_HOST" --arg map "$MARIADB_PORT" \
     --arg pgh "$PG_HOST"      --arg pgp "$PG_PORT" \
@@ -413,7 +427,7 @@ INPUTS="$(jq -n \
         BucketName: $bucket, Region: $region, AccessKey: $ak, SecretKey: $sk,
         BucketEndpoint: $bep, BucketLookup: $blk,
         VMHost: $vmhost, VMUser: $vmuser, VMKeyPath: $vmkey, VMDataPath: $vmpath,
-        DBUser: $dbuser, DBPassword: $dbpass, DBName: $dbname,
+        DBUser: $dbuser, DBPassword: $dbpass, DBName: $dbname, MongoUser: $mguser,
         MySQLHost: $myh,    MySQLPort: $myp,
         MariaDBHost: $mah,  MariaDBPort: $map,
         PostgresHost: $pgh, PostgresPort: $pgp,

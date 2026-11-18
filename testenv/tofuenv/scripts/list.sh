@@ -46,8 +46,8 @@ if [ -z "$ROWS" ]; then
     exit 0
 fi
 
-printf '  %-4s  %-12s  %-6s  %-3s  %-8s  %s\n' CSP PREFIX bucket vm database network
-for csp in aws ncp; do
+printf '  %-7s  %-12s  %-6s  %-3s  %-8s  %s\n' CSP PREFIX bucket vm database network
+for csp in aws ncp alibaba; do
     current="$(ws_current "$csp")"
     for ws in $(printf '%s\n' "$ROWS" | awk -v c="$csp" '$1 == c { print $3 }' | sort -u); do
         cells=()
@@ -62,7 +62,7 @@ for csp in aws ncp; do
         done
         label="$ws"
         [ "$ws" = "$current" ] && label="$ws *"
-        printf '  %-4s  %-12s  %-6s  %-3s  %-8s  %s\n' "$csp" "$label" "${cells[@]}"
+        printf '  %-7s  %-12s  %-6s  %-3s  %-8s  %s\n' "$csp" "$label" "${cells[@]}"
     done
 done
 
