@@ -11,6 +11,11 @@
 #
 #   Each engine exists only when var.alibaba_db_engines names it, so prepare.sh /
 #   teardown.sh --engine can add or remove one without touching the others.
+#
+#   MySQL and MariaDB get log_bin_trust_function_creators=1 (a parameters block):
+#   binary logging is on and the master account has no SUPER, which makes
+#   CREATE FUNCTION / TRIGGER fail with Error 1419 - see
+#   dummy/docs/OPENTOFU_CSP별_DB파라미터_조사.md. PostgreSQL has no such parameter.
 # ---------------------------------------------------------------------------
 locals {
   db_password = data.vault_kv_secret_v2.db.data["ALIBABA_DB_PASSWORD"]
@@ -121,6 +126,14 @@ resource "alicloud_db_instance" "mysql" {
   security_ips             = [var.allowed_cidr]
   deletion_protection      = false
 
+  # The master account has no SUPER, and binary logging is on, so creating the
+  # fixture's stored functions and triggers would fail with Error 1419 without it.
+  # Set after the instance is launched (ModifyParameter); dynamic, no restart.
+  parameters {
+    name  = "log_bin_trust_function_creators"
+    value = "1"
+  }
+
   lifecycle {
     precondition {
       condition     = local.mysql_class_ok
@@ -177,6 +190,13 @@ resource "alicloud_db_instance" "mariadb" {
   zone_id_slave_a          = local.mariadb_category == "Basic" ? null : var.alibaba_zone
   security_ips             = [var.allowed_cidr]
   deletion_protection      = false
+
+  # Same as MySQL: lets the non-SUPER master account create stored functions and
+  # triggers while binary logging is on (Error 1419 otherwise).
+  parameters {
+    name  = "log_bin_trust_function_creators"
+    value = "1"
+  }
 
   lifecycle {
     precondition {
