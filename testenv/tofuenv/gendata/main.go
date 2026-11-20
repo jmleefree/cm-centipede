@@ -35,7 +35,7 @@ func run() error {
 	var (
 		configPath = flag.String("config", "config/config.json", "path to config.json")
 		targetFlag = flag.String("target", "all", "bucket|filesystem|database|all")
-		provider   = flag.String("provider", "aws", "cloud provider: aws|ncp|alibaba")
+		provider   = flag.String("provider", "aws", "cloud provider: aws|ncp|alibaba|azure")
 		engineFlag = flag.String("engine", "all", "database engine: mysql|mariadb|postgresql|mongodb|all")
 		inputsFile = flag.String("inputs-file", "", "JSON with the connection info: a path, or - for stdin (required)")
 		dryRun     = flag.Bool("dry-run", false, "generate only; skip upload/transfer/db load")
@@ -718,6 +718,7 @@ func dbConfig(in *config.Inputs, e database.Engine) (database.Config, bool) {
 		if in.MongoUser != "" {
 			c.User = in.MongoUser
 		}
+		c.URI = in.MongoURI
 	}
 	if c.Host == "" {
 		return c, false

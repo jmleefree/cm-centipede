@@ -13,6 +13,7 @@
 #          outputs it is read from stay postgres_host / postgres_port)
 #     ./scripts/gen-data.sh --provider ncp --target all         # NCP resources
 #     ./scripts/gen-data.sh --provider alibaba --target all     # Alibaba resources
+#     ./scripts/gen-data.sh --provider azure --target all       # Azure resources
 #     ./scripts/gen-data.sh --target all --dry-run             # generate only, skip upload/transfer/load
 #     ./scripts/gen-data.sh --target bucket --force            # skip the existing-data check
 #     ./scripts/gen-data.sh --source vm --target database      # the DBs installed ON the aws VM
@@ -144,8 +145,8 @@ if [ "$HELP" -eq 1 ]; then
 fi
 
 case "$PROVIDER" in
-    aws|ncp|alibaba) ;;
-    *) die "unknown provider '${PROVIDER}' (aws|ncp|alibaba)" ;;
+    aws|ncp|alibaba|azure) ;;
+    *) die "unknown provider '${PROVIDER}' (aws|ncp|alibaba|azure)" ;;
 esac
 case "$SOURCE" in
     managed) ;;
@@ -256,7 +257,7 @@ vault_read() {
 
 BUCKET_NAME=""; REGION=""; ACCESS_KEY=""; SECRET_KEY=""; BUCKET_ENDPOINT=""; BUCKET_LOOKUP=""
 VM_HOST=""; VM_USER=""; VM_KEY=""; VM_PATH=""; VM_VOLUME_GB=0
-DB_USER=""; DB_PASSWORD=""; DB_NAME=""; DB_STORAGE_GB=0; MONGO_USER=""
+DB_USER=""; DB_PASSWORD=""; DB_NAME=""; DB_STORAGE_GB=0; MONGO_USER=""; MONGO_URI=""
 MYSQL_HOST=""; MYSQL_PORT=""; MARIADB_HOST=""; MARIADB_PORT=""
 PG_HOST=""; PG_PORT=""; MONGO_HOST=""; MONGO_PORT=""
 
@@ -295,6 +296,10 @@ elif want bucket; then
     case "$PROVIDER" in
         ncp)     AK_KEY="NCP_ACCESS_KEY"; SK_KEY="NCP_SECRET_KEY" ;;
         alibaba) AK_KEY="ALIBABA_ACCESS_KEY_ID"; SK_KEY="ALIBABA_ACCESS_KEY_SECRET" ;;
+        # Azure Blob: the storage account name and one of its keys, which gendata's
+        # azblob client takes as AccessKey and SecretKey (cb-spider's S3AccessKey /
+        # S3SecretKey). Not the service principal: that one drives tofu only.
+        azure)   AK_KEY="AZURE_S3_ACCESS_KEY"; SK_KEY="AZURE_S3_SECRET_KEY" ;;
         *)       AK_KEY="AWS_ACCESS_KEY_ID"; SK_KEY="AWS_SECRET_ACCESS_KEY" ;;
     esac
     if ! ACCESS_KEY="$(vault_read "csp/${PROVIDER}" "$AK_KEY")"; then
@@ -313,7 +318,7 @@ if want filesystem; then
     VM_USER="$(out_val "$VO" ssh_user)"
     if [ -z "$VM_USER" ]; then
         # The login account of the CSP-provided Linux images.
-        case "$PROVIDER" in ncp|alibaba) VM_USER="root" ;; *) VM_USER="ubuntu" ;; esac
+        case "$PROVIDER" in ncp|alibaba) VM_USER="root" ;; azure) VM_USER="azureuser" ;; *) VM_USER="ubuntu" ;; esac
     fi
     VM_KEY="$(out_val "$VO" key_file)"
     # gendata runs from its own directory, so the key path has to be absolute.
@@ -379,6 +384,11 @@ elif want database; then
     # Only a module whose MongoDB account differs from db_username publishes it
     # (alibaba: replica sets have root only); empty leaves gendata on DBUser.
     MONGO_USER="$(out_val "$DO" mongodb_username)"
+    # A complete MongoDB connection string gendata uses as is, for a target whose
+    # address cannot be assembled from host and port (azure: Cosmos DB vCore hands
+    # out mongodb+srv:// with TLS required). Not mongodb_connection_uri, which every
+    # module has for people to copy and which gendata must not be given as is.
+    MONGO_URI="$(out_val "$DO" mongodb_uri)"
     DB_PASSWORD="$(out_val "$DO" db_password)"
     DB_NAME="$(out_val "$DO" db_name)"
     MYSQL_HOST="$(out_val "$DO" mysql_host)";     MYSQL_PORT="$(out_val "$DO" mysql_port)"
@@ -406,6 +416,13 @@ elif want database; then
                 DB_STORAGE_GB="${TF_VAR_alibaba_mongodb_storage:-20}"
             fi
             ;;
+        # azure: the smallest of the three engines' storage, for the same reason.
+        azure)
+            DB_STORAGE_GB="${TF_VAR_azure_mysql_storage_gb:-20}"
+            for s in "${TF_VAR_azure_postgres_storage_gb:-32}" "${TF_VAR_azure_mongodb_storage_gb:-32}"; do
+                if [ "$s" -lt "$DB_STORAGE_GB" ]; then DB_STORAGE_GB="$s"; fi
+            done
+            ;;
     esac
 fi
 
@@ -417,7 +434,7 @@ INPUTS="$(jq -n \
     --arg vmhost "$VM_HOST" --arg vmuser "$VM_USER" \
     --arg vmkey "$VM_KEY"   --arg vmpath "$VM_PATH" \
     --arg dbuser "$DB_USER" --arg dbpass "$DB_PASSWORD" --arg dbname "$DB_NAME" \
-    --arg mguser "$MONGO_USER" \
+    --arg mguser "$MONGO_USER" --arg mguri "$MONGO_URI" \
     --arg myh "$MYSQL_HOST"   --arg myp "$MYSQL_PORT" \
     --arg mah "$MARIADB_HOST" --arg map "$MARIADB_PORT" \
     --arg pgh "$PG_HOST"      --arg pgp "$PG_PORT" \
@@ -428,6 +445,7 @@ INPUTS="$(jq -n \
         BucketEndpoint: $bep, BucketLookup: $blk,
         VMHost: $vmhost, VMUser: $vmuser, VMKeyPath: $vmkey, VMDataPath: $vmpath,
         DBUser: $dbuser, DBPassword: $dbpass, DBName: $dbname, MongoUser: $mguser,
+        MongoURI: $mguri,
         MySQLHost: $myh,    MySQLPort: $myp,
         MariaDBHost: $mah,  MariaDBPort: $map,
         PostgresHost: $pgh, PostgresPort: $pgp,
@@ -452,8 +470,11 @@ if want database; then
     printf '%s' "$INPUTS" | jq -r '
         "  mysql      : " + (if .MySQLHost == "" then "-" else .MySQLHost + ":" + .MySQLPort end),
         "  postgresql : " + (if .PostgresHost == "" then "-" else .PostgresHost + ":" + .PostgresPort end)'
-    if [ "$PROVIDER" = "ncp" ] || [ "$SOURCE" = "vm" ]; then
-        printf '%s' "$INPUTS" | jq -r '"  mongodb    : " + (if .MongoHost == "" then "-" else .MongoHost + ":" + .MongoPort end)'
+    # The URI itself carries the password, so only the host is shown for it.
+    if [ "$PROVIDER" != "aws" ] || [ "$SOURCE" = "vm" ]; then
+        printf '%s' "$INPUTS" | jq -r '"  mongodb    : " + (if .MongoHost == "" then "-"
+            elif .MongoURI != "" then .MongoHost + " (connection string)"
+            else .MongoHost + ":" + .MongoPort end)'
     fi
     if [ "$PROVIDER" = "aws" ]; then
         printf '%s' "$INPUTS" | jq -r '"  mariadb    : " + (if .MariaDBHost == "" then "-" else .MariaDBHost + ":" + .MariaDBPort end)'

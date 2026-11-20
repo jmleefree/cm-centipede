@@ -9,7 +9,7 @@ something real to migrate:
 | **filesystem** | The same dummy files transferred to a VM over SFTP |
 | **database** | The `shop_db` tables and seed data, loaded with native Go drivers |
 
-Works against **AWS**, **NCP** and **Alibaba Cloud**, selected with `--provider`.
+Works against **AWS**, **NCP**, **Alibaba Cloud** and **Azure**, selected with `--provider`.
 
 > gendata is a **standalone Go module**, separate from the repository root
 > module. Run go commands with `GOWORK=off` so they build against this module's
@@ -56,16 +56,18 @@ put no secrets in one.
    ```bash
    cd tofuenv
    ./scripts/up.sh
-   ./scripts/prepare.sh <aws|ncp|alibaba> <bucket|vm|database>
+   ./scripts/prepare.sh <aws|ncp|alibaba|azure> <bucket|vm|database>
    ```
 
    `../scripts/gen-data.sh` reads `tofu output` through the `tofuenv-runner`
    container, so a target with no state is reported rather than guessed at.
 
 2. **`tofuenv/.env` has `VAULT_ADDR` and `VAULT_TOKEN`.** CSP access keys are *not*
-   read from `.env` — they come from OpenBao at `secret/csp/aws`, `secret/csp/ncp` or
-   `secret/csp/alibaba`,
-   because `up.sh` blanks them in `.env` after registering them.
+   read from `.env` — they come from OpenBao at `secret/csp/aws`, `secret/csp/ncp`,
+   `secret/csp/alibaba` or `secret/csp/azure`,
+   because `up.sh` blanks them in `.env` after registering them. For Azure the bucket
+   target takes `AZURE_S3_ACCESS_KEY` / `AZURE_S3_SECRET_KEY` from there - the storage
+   account's name and key, not the service principal.
 
 3. **Go is installed** (to build the binary).
 
@@ -81,6 +83,7 @@ put no secrets in one.
 ./gendata --target all                            # bucket + filesystem + database (AWS)
 ./gendata --target all --provider ncp              # the same, on NCP
 ./gendata --target all --provider alibaba          # the same, on Alibaba
+./gendata --target all --provider azure            # the same, on Azure
 ./gendata --target bucket                          # one target
 ./gendata --target database --engine mysql         # one engine
 ./gendata --target all --dry-run                   # generate locally, send nothing
@@ -97,7 +100,7 @@ every flag straight through, which is usually more convenient.
 | Flag | Default | Values |
 |---|---|---|
 | `--target` | `all` | `bucket`, `filesystem`, `database`, `all` |
-| `--provider` | `aws` | `aws`, `ncp`, `alibaba` |
+| `--provider` | `aws` | `aws`, `ncp`, `alibaba`, `azure` |
 | `--engine` | `all` | `mysql`, `mariadb`, `postgresql`, `mongodb`, `all` |
 | `--config` | `config/config.json` | Path to the config file |
 | `--inputs-file` | — | **Required.** JSON with the connection info: a path, or `-` for stdin |
@@ -133,7 +136,8 @@ Two consequences of that job:
 since `--target` defaults to `all` and a silent partial cleanup would be worse than a
 refusal. AWS and Alibaba are not rejected — the same bucket may be reached with any
 CSP's credentials — they simply never need this, because `force_destroy` on
-`aws_s3_bucket` and `alicloud_oss_bucket` already covers it.
+`aws_s3_bucket` and `alicloud_oss_bucket` already covers it. Neither does Azure:
+deleting a Blob container deletes the blobs in it.
 
 ### Build targets
 
@@ -153,7 +157,8 @@ make clean
    variables on top of it, and the connection info from `--inputs-file` (the
    wrapper pipes it in). Ports, `DBUser` and `DBName` left empty get gendata's
    defaults: `3306`/`5432`/`27017`, `dbadmin`, `testdb`. `MongoUser`, when set,
-   replaces `DBUser` for MongoDB alone; empty means `DBUser`.
+   replaces `DBUser` for MongoDB alone; empty means `DBUser`. `MongoURI`, when set,
+   is the whole MongoDB connection string and is used as is (see below).
 2. **Pre-flight capacity check** — a size that would not fit on the prepared
    volume or DB storage stops the run here. `--force` overrides it.
 3. **Pre-flight existing-data check** — if the target already holds data, gendata
@@ -229,6 +234,13 @@ A replica set there has one account, `root`, so the module also outputs
 `mongodb_username` and `../scripts/gen-data.sh` passes it as `MongoUser` — the RDS
 engines keep `DBUser`.
 
+**Azure** is the one target the URI is not assembled for. Azure DocumentDB (Cosmos DB
+for MongoDB vCore) hands out a `mongodb+srv://` connection string that requires TLS,
+which neither a host and port nor `directConnection` can express. The database module
+outputs it, admin and password filled in, as `mongodb_uri`; `../scripts/gen-data.sh`
+passes it as `MongoURI`, and gendata connects with it untouched. `MongoHost` is still
+sent - it is what says the engine is prepared - but only for the log.
+
 ---
 
 ## How much data — `.env`, then `config.json`
@@ -281,8 +293,8 @@ of one:
 
 | Target | Limit | From |
 |---|---|---|
-| filesystem | VM root volume | `TF_VAR_aws_vm_volume_size` (20 GB); NCP the vm module's `volume_size` output (`TF_VAR_ncp_vm_volume_size`, 50 GB), skipped for a VM built before it existed; Alibaba the vm module's `volume_size` output (`TF_VAR_alibaba_vm_volume_size`, 40 GB) |
-| database | instance storage | AWS `TF_VAR_aws_db_allocated_storage` (20 GB); NCP not checked - Cloud DB storage grows by itself; Alibaba the smaller of `TF_VAR_alibaba_db_allocated_storage` and `TF_VAR_alibaba_mongodb_storage` (20 GB each), since one figure covers every engine |
+| filesystem | VM root volume | `TF_VAR_aws_vm_volume_size` (20 GB); NCP the vm module's `volume_size` output (`TF_VAR_ncp_vm_volume_size`, 50 GB), skipped for a VM built before it existed; Alibaba the vm module's `volume_size` output (`TF_VAR_alibaba_vm_volume_size`, 40 GB); Azure the vm module's `volume_size` output (`TF_VAR_azure_vm_volume_size`, 30 GB) |
+| database | instance storage | AWS `TF_VAR_aws_db_allocated_storage` (20 GB); NCP not checked - Cloud DB storage grows by itself; Alibaba the smaller of `TF_VAR_alibaba_db_allocated_storage` and `TF_VAR_alibaba_mongodb_storage` (20 GB each), since one figure covers every engine; Azure the smallest of `TF_VAR_azure_{mysql,postgres,mongodb}_storage_gb` (20 / 32 / 32 GB), for the same reason |
 
 This is not tidiness. A managed instance that fills its volume goes read-only or
 into `STORAGE_FULL`, and on both CSPs the way back is teardown and prepare
@@ -356,7 +368,7 @@ spread over `connections` SSH connections, since one TCP connection over a long 
 caps the throughput however many requests share it. The default path is owned by
 `ubuntu`, so no sudo is needed. If the vm module exports a `data_path` output, that
 value wins — which is how NCP and Alibaba end up at `/root/testdata`, since their
-images log in as `root`.
+images log in as `root`, and Azure at `/home/azureuser/testdata`, its login account.
 
 **`database`** — the bulk phase. `sizeMB` is the only field expected to change
 between runs, and `.env` carries it; the rest is tuning a deployment sets once, if

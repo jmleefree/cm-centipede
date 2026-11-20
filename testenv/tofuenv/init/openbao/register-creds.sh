@@ -10,6 +10,9 @@
 #     secret/db/ncp   <- NCP_DB_PASSWORD
 #     secret/csp/alibaba <- ALIBABA_ACCESS_KEY_ID, ALIBABA_ACCESS_KEY_SECRET
 #     secret/db/alibaba  <- ALIBABA_DB_PASSWORD  (RDS and MongoDB share it)
+#     secret/csp/azure   <- AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID,
+#                           AZURE_SUBSCRIPTION_ID, AZURE_S3_ACCESS_KEY, AZURE_S3_SECRET_KEY
+#     secret/db/azure    <- AZURE_DB_PASSWORD  (MySQL, PostgreSQL and MongoDB share it)
 #
 #   Idempotency:
 #     - A group is skipped when its "trigger" key is empty, so re-running after
@@ -173,6 +176,58 @@ if [ -n "${ALIBABA_DB_PASSWORD:-}" ]; then
     echo -e "  ${GREEN}OK${NC}   ALIBABA_DB_PASSWORD passed the RDS + MongoDB rule check"
 fi
 
+# Validate the Azure DB password. MySQL and PostgreSQL Flexible Server and MongoDB
+# vCore share it: 8-128 chars, at least three of uppercase / lowercase / digit /
+# special, and it must not contain the admin login (Azure refuses that). As for
+# Alibaba, only ! $ ^ & * ( ) _ + - = are accepted as specials: @ # % and the like
+# would break the connection URIs the password ends up in.
+validate_azure_db_password() {
+    local pw="$1" user="$2"
+    local len=${#pw}
+    local kinds=0
+    if [ "$len" -lt 8 ] || [ "$len" -gt 128 ]; then
+        echo "must be 8-128 characters (currently ${len})"; return 1
+    fi
+    if printf '%s' "$pw" | LC_ALL=C grep -q '[^A-Za-z0-9!$^&*()_+=-]'; then
+        echo "may contain only letters, digits and ! \$ ^ & * ( ) _ + - ="; return 1
+    fi
+    printf '%s' "$pw" | LC_ALL=C grep -q '[A-Z]'           && kinds=$((kinds + 1))
+    printf '%s' "$pw" | LC_ALL=C grep -q '[a-z]'           && kinds=$((kinds + 1))
+    printf '%s' "$pw" | LC_ALL=C grep -q '[0-9]'           && kinds=$((kinds + 1))
+    printf '%s' "$pw" | LC_ALL=C grep -q '[!$^&*()_+=-]'   && kinds=$((kinds + 1))
+    if [ "$kinds" -lt 3 ]; then
+        echo "must mix at least three of uppercase, lowercase, digits and special characters (has ${kinds})"; return 1
+    fi
+    if [ -n "$user" ] && printf '%s' "$pw" | LC_ALL=C grep -qiF -- "$user"; then
+        echo "must not contain the admin login '${user}' (TF_VAR_azure_db_username)"; return 1
+    fi
+    return 0
+}
+
+if [ -n "${AZURE_DB_PASSWORD:-}" ]; then
+    if ! reason=$(validate_azure_db_password "$AZURE_DB_PASSWORD" "${TF_VAR_azure_db_username:-dbadmin}"); then
+        echo -e "  ${RED}FAIL${NC} AZURE_DB_PASSWORD rejected: ${reason}" >&2
+        echo -e "  ${YELLOW}See the Azure password rules in .env.example.${NC}" >&2
+        exit 1
+    fi
+    echo -e "  ${GREEN}OK${NC}   AZURE_DB_PASSWORD passed the MySQL + PostgreSQL + MongoDB rule check"
+fi
+
+# secret/csp/azure holds six keys, and a registration replaces the whole secret.
+# Registering with some of them empty would store those empty over the ones
+# already there - the S3 keys lost because only the service principal was filled
+# in, say. So once any of the six is set, all six must be.
+AZURE_CSP_KEYS="AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_S3_ACCESS_KEY AZURE_S3_SECRET_KEY"
+azure_set="" azure_missing=""
+for k in $AZURE_CSP_KEYS; do
+    if [ -n "${!k:-}" ]; then azure_set="$azure_set $k"; else azure_missing="$azure_missing $k"; fi
+done
+if [ -n "$azure_set" ] && [ -n "$azure_missing" ]; then
+    echo -e "  ${RED}FAIL${NC} secret/csp/azure needs all six keys at once; these are empty:${azure_missing}" >&2
+    echo -e "  ${YELLOW}It is stored as one secret, so a partial registration would blank the others.${NC}" >&2
+    exit 1
+fi
+
 # Validate the aws VM server password against the rules tofu/aws/vm enforces:
 # 8+ characters (MinIO's minimum) and none of ' " ` \ $ or whitespace, since the
 # install scripts write it into SQL, bash, PowerShell, YAML and XML unquoted.
@@ -211,6 +266,11 @@ register_group "csp/alibaba" "ALIBABA_ACCESS_KEY_SECRET" \
     ALIBABA_ACCESS_KEY_ID ALIBABA_ACCESS_KEY_SECRET
 register_group "db/alibaba" "ALIBABA_DB_PASSWORD" \
     ALIBABA_DB_PASSWORD
+register_group "csp/azure" "AZURE_CLIENT_SECRET" \
+    AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID \
+    AZURE_S3_ACCESS_KEY AZURE_S3_SECRET_KEY
+register_group "db/azure" "AZURE_DB_PASSWORD" \
+    AZURE_DB_PASSWORD
 
 # Blank the keys that were registered successfully
 if [ "${#KEYS_TO_BLANK[@]}" -gt 0 ]; then
@@ -230,3 +290,4 @@ echo -e "${CYAN}=== Done ===${NC}"
 echo "  Verify:  curl -s -H \"X-Vault-Token: \$VAULT_TOKEN\" ${VAULT_ADDR}/v1/secret/data/csp/aws | jq .data.data"
 echo "           curl -s -H \"X-Vault-Token: \$VAULT_TOKEN\" ${VAULT_ADDR}/v1/secret/data/csp/ncp | jq .data.data"
 echo "           curl -s -H \"X-Vault-Token: \$VAULT_TOKEN\" ${VAULT_ADDR}/v1/secret/data/csp/alibaba | jq .data.data"
+echo "           curl -s -H \"X-Vault-Token: \$VAULT_TOKEN\" ${VAULT_ADDR}/v1/secret/data/csp/azure | jq .data.data"

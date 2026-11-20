@@ -99,7 +99,8 @@ ws_prepared() {
         for dir in /work/tofu/aws/bucket /work/tofu/aws/vm /work/tofu/aws/database \
                    /work/tofu/ncp/bucket /work/tofu/ncp/vm /work/tofu/ncp/database /work/tofu/ncp/network \
                    /work/tofu/alibaba/bucket /work/tofu/alibaba/vm /work/tofu/alibaba/database \
-                   /work/tofu/alibaba/network; do
+                   /work/tofu/alibaba/network \
+                   /work/tofu/azure/bucket /work/tofu/azure/vm /work/tofu/azure/database; do
             [ -d "$dir" ] || continue
             rel="${dir#/work/tofu/}"; csp="${rel%%/*}"; mod="${rel#*/}"
             for f in "$dir"/terraform.tfstate.d/*/terraform.tfstate; do

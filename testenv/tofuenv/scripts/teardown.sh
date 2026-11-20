@@ -6,6 +6,7 @@
 #     aws     : bucket | vm | database
 #     ncp     : bucket | vm | database
 #     alibaba : bucket | vm | database
+#     azure   : bucket | vm | database
 #
 #   Examples:
 #     ./scripts/teardown.sh aws database
@@ -15,7 +16,7 @@
 #   One engine at a time (database only):
 #     --engine destroys just the engines named; the others keep running untouched.
 #     aws: mysql | mariadb | postgresql, ncp: mysql | postgresql | mongodb,
-#     alibaba: mysql | mariadb | postgresql | mongodb.
+#     alibaba: mysql | mariadb | postgresql | mongodb, azure: mysql | postgresql | mongodb.
 #     It is a targeted destroy of those engines' own resources (see
 #     db_engine_targets in scripts/lib/db-engines.sh), not an apply of the shorter
 #     engine list: an apply would also roll any .env change into the engines that
@@ -75,6 +76,12 @@
 #       force_destroy, so the destroy deletes the objects itself.
 #     - tofu/alibaba/network is destroyed automatically once neither
 #       alibaba/vm nor alibaba/database holds state, as ncp/network is.
+#
+#   Azure notes:
+#     - azure/bucket removes only the container, blobs and all; the storage
+#       account (AZURE_S3_ACCESS_KEY) existed before and is left in place.
+#     - azure/vm and azure/database delete their resource group, and with it
+#       everything in it. There is no network module to clean up.
 # ==============================================================================
 set -euo pipefail
 
@@ -87,11 +94,13 @@ Usage: teardown.sh <csp> <resource> [--engine e1,e2]
   aws     : bucket | vm | database
   ncp     : bucket | vm | database
   alibaba : bucket | vm | database
+  azure   : bucket | vm | database
 
   --engine (database only) destroys just the engines named; the others stay.
     aws     : mysql | mariadb | postgresql
     ncp     : mysql | postgresql | mongodb
     alibaba : mysql | mariadb | postgresql | mongodb
+    azure   : mysql | postgresql | mongodb
   Removing the last engine destroys the whole database module.
 
   ncp/network and alibaba/network are destroyed automatically once neither vm nor
@@ -123,8 +132,8 @@ done
 [ -z "$CSP" ] || [ -z "$RESOURCE" ] && usage
 
 case "$CSP" in
-    aws|ncp|alibaba) ;;
-    *) echo "invalid csp: $CSP (supported: aws, ncp, alibaba)" >&2; usage ;;
+    aws|ncp|alibaba|azure) ;;
+    *) echo "invalid csp: $CSP (supported: aws, ncp, alibaba, azure)" >&2; usage ;;
 esac
 
 case "$RESOURCE" in

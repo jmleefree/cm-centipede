@@ -65,7 +65,7 @@ echo -e "${CYAN}[4/4] Starting tofu-runner...${NC}"
 docker compose up -d --force-recreate tofu-runner
 
 echo -e "${GREEN}=== Ready ===${NC}"
-echo "  Prepare    :  ./scripts/prepare.sh <csp> <resource>     # csp: aws|ncp|alibaba, resource: bucket|vm|database"
+echo "  Prepare    :  ./scripts/prepare.sh <csp> <resource>     # csp: aws|ncp|alibaba|azure, resource: bucket|vm|database"
 echo "  Examples   :  ./scripts/prepare.sh aws bucket"
 echo "                ./scripts/prepare.sh ncp database"
 echo "  Teardown   :  ./scripts/teardown.sh <csp> <resource>"

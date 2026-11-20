@@ -47,7 +47,10 @@ PLACEHOLDER_VARS="AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DB_PASSWORD
 TF_VAR_aws_vm_server_password
 NCP_ACCESS_KEY NCP_SECRET_KEY NCP_DB_PASSWORD
 ALIBABA_ACCESS_KEY_ID ALIBABA_ACCESS_KEY_SECRET ALIBABA_DB_PASSWORD
-TF_VAR_aws_bucket_name TF_VAR_ncp_bucket_name TF_VAR_alibaba_bucket_name"
+AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID
+AZURE_S3_ACCESS_KEY AZURE_S3_SECRET_KEY AZURE_DB_PASSWORD
+TF_VAR_aws_bucket_name TF_VAR_ncp_bucket_name TF_VAR_alibaba_bucket_name
+TF_VAR_azure_bucket_name"
 
 # assert_no_placeholder — refuse to run while any of PLACEHOLDER_VARS is unset or
 #   still holds ChangeMe (case-insensitive, surrounding whitespace ignored).

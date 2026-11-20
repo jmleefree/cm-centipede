@@ -6,6 +6,7 @@
 #     aws     : bucket | vm | database
 #     ncp     : bucket | vm | database
 #     alibaba : bucket | vm | database
+#     azure   : bucket | vm | database
 #
 #   Examples:
 #     ./scripts/prepare.sh aws bucket
@@ -16,7 +17,7 @@
 #   One engine at a time (database only):
 #     --engine adds the engines named to the ones the prefix already runs; those keep
 #     running. aws: mysql | mariadb | postgresql, ncp: mysql | postgresql | mongodb,
-#     alibaba: mysql | mariadb | postgresql | mongodb.
+#     alibaba: mysql | mariadb | postgresql | mongodb, azure: mysql | postgresql | mongodb.
 #     Without --engine a fresh database module gets every engine, as before. The
 #     list is worked out here and handed to tofu as TF_VAR_<csp>_db_engines (see
 #     scripts/lib/db-engines.sh); it is not a .env setting.
@@ -68,6 +69,17 @@
 #       is checked here and created if missing, through the aliyun CLI in the
 #       runner. It is account-wide, so no module owns it and teardown leaves it.
 #       The RAM user needs ram:CreateServiceLinkedRole for that one call.
+#
+#   Azure notes:
+#     - There is no network module: tofu/azure/vm builds its own VNet, subnet and
+#       NSG in its resource group (<prefix>-vm-rg), and the databases are reached
+#       over their public endpoints. vm and database each own a resource group,
+#       which teardown.sh deletes with everything in it.
+#     - tofu/azure/bucket creates only the container, in the existing storage
+#       account given as AZURE_S3_ACCESS_KEY; the account is not created here.
+#     - azurerm 5.x registers no resource provider by default. Each module
+#       registers the ones it uses (Microsoft.Storage, .Compute, .Network, ...),
+#       so the service principal must be allowed to - Contributor is.
 # ==============================================================================
 set -euo pipefail
 
@@ -80,6 +92,7 @@ Usage: prepare.sh <csp> <resource> [--engine e1,e2] [--force]
   aws     : bucket | vm | database
   ncp     : bucket | vm | database
   alibaba : bucket | vm | database
+  azure   : bucket | vm | database
 
   A resource that already holds state is reported and left alone; --force re-applies
   it, which is what converges a module whose previous apply stopped halfway.
@@ -88,11 +101,14 @@ Usage: prepare.sh <csp> <resource> [--engine e1,e2] [--force]
     aws     : mysql | mariadb | postgresql
     ncp     : mysql | postgresql | mongodb
     alibaba : mysql | mariadb | postgresql | mongodb
+    azure   : mysql | postgresql | mongodb
 
   ncp/network and alibaba/network are created automatically when vm or database needs it.
+  azure has no network module: the vm module builds its own network.
   For AWS engine versions, instance classes and the AMI: ./scripts/aws-db-versions.sh
   For NCP engine versions, images and specs: ./scripts/ncp-db-versions.sh
   For Alibaba zones, RDS versions and classes, ECS types: ./scripts/alibaba-db-versions.sh
+  For Azure DB versions and SKUs, VM sizes and images: ./scripts/azure-db-versions.sh
 EOF
     exit 1
 }
@@ -121,8 +137,8 @@ done
 [ -z "$CSP" ] || [ -z "$RESOURCE" ] && usage
 
 case "$CSP" in
-    aws|ncp|alibaba) ;;
-    *) echo "invalid csp: $CSP (supported: aws, ncp, alibaba)" >&2; usage ;;
+    aws|ncp|alibaba|azure) ;;
+    *) echo "invalid csp: $CSP (supported: aws, ncp, alibaba, azure)" >&2; usage ;;
 esac
 
 case "$RESOURCE" in

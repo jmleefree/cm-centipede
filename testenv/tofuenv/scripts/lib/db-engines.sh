@@ -22,6 +22,7 @@ db_all_engines() {
         aws)     echo "mysql mariadb postgres" ;;
         ncp)     echo "mysql postgres mongodb" ;;
         alibaba) echo "mysql mariadb postgres mongodb" ;;
+        azure)   echo "mysql postgres mongodb" ;;
     esac
 }
 
@@ -89,18 +90,24 @@ db_intersect() { local e out=""; for e in $1; do db_has "$2" "$e" && out="$out $
 #   The bare address is matched as well as [0]: a state written before the engines
 #   took a count still holds the bare one until the next apply moves it.
 db_state_engines() {
-    local mod="$1" re
+    # grp is the regex group holding the engine name: the first, except where the
+    # resource type has to be spelled out as a group of its own (azure).
+    local mod="$1" re grp='\1'
     case "$CSP" in
         aws)     re='^aws_db_instance\.(mysql|mariadb|postgres)(\[0\])?$' ;;
         ncp)     re='^ncloud_(mysql|postgresql|mongodb)\.this(\[0\])?$' ;;
         # RDS engines are alicloud_db_instance.<engine>, MongoDB is
         # alicloud_mongodb_instance.mongodb.
         alibaba) re='^alicloud_[a-z]+_instance\.(mysql|mariadb|postgres|mongodb)(\[0\])?$' ;;
+        # The servers only: azurerm_mysql_flexible_server.mysql,
+        # azurerm_postgresql_flexible_server.postgres, azurerm_mongo_cluster.mongodb.
+        azure)   re='^azurerm_(mysql_flexible_server|postgresql_flexible_server|mongo_cluster)\.(mysql|postgres|mongodb)(\[0\])?$'
+                 grp='\2' ;;
     esac
     ws_exec bash -c '
         cd "/work/'"$mod"'" 2>/dev/null || exit 0
         tofu state list 2>/dev/null || true
-    ' | sed -nE "s/${re}/\1/p" | sed 's/^postgresql$/postgres/' | tr '\n' ' ' \
+    ' | sed -nE "s/${re}/${grp}/p" | sed 's/^postgresql$/postgres/' | tr '\n' ' ' \
       | { read -r list || true; db_sorted "$list"; }
 }
 
@@ -127,6 +134,10 @@ db_engine_targets() {
             # public connection) along with it.
             alibaba:mongodb) out="$out -target=alicloud_mongodb_instance.mongodb" ;;
             alibaba:*)       out="$out -target=alicloud_db_instance.$e" ;;
+            # As on Alibaba, the server takes its database and firewall rules along.
+            azure:mysql)     out="$out -target=azurerm_mysql_flexible_server.mysql" ;;
+            azure:postgres)  out="$out -target=azurerm_postgresql_flexible_server.postgres" ;;
+            azure:mongodb)   out="$out -target=azurerm_mongo_cluster.mongodb" ;;
         esac
     done
     echo "${out# }"

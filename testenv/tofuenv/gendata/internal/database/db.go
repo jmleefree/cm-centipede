@@ -68,6 +68,12 @@ type Config struct {
 	// (default) statement errors are logged and loading continues (RDS quirks:
 	// event_scheduler / log_bin_trust_function_creators).
 	Strict bool
+	// URI, MongoDB only, is a complete connection string used as is instead of
+	// one assembled from Host/Port/User/Password. It exists for a target whose
+	// address cannot be put together that way: Azure Cosmos DB for MongoDB vCore
+	// hands out a mongodb+srv:// URI that requires TLS, which neither
+	// directConnection nor a plain host:port can express. Empty means assemble.
+	URI string
 }
 
 // targetDB returns the database to load into (Config.Database or shop_db fallback).
@@ -335,7 +341,12 @@ type mongoFixture struct {
 // directConnection pins the driver to the address it was given and skips discovery
 // entirely. That is exactly right for a single-node target and harmless against any
 // other MongoDB reached through a hand-assembled --inputs-file.
+//
+// A URI given in cfg.URI wins and is used untouched - see Config.URI.
 func mongoURI(cfg Config) string {
+	if cfg.URI != "" {
+		return cfg.URI
+	}
 	return fmt.Sprintf("mongodb://%s:%s@%s:%s/?authSource=admin&directConnection=true",
 		cfg.User, cfg.Password, cfg.Host, cfg.Port)
 }

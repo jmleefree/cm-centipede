@@ -40,7 +40,13 @@ type Inputs struct {
 	// MongoUser overrides DBUser for MongoDB alone. A CSP whose managed MongoDB
 	// has a fixed account - Alibaba replica sets only have root - cannot share
 	// the account name of its other engines. Empty means DBUser.
-	MongoUser    string `json:"MongoUser"`
+	MongoUser string `json:"MongoUser"`
+	// MongoURI, when set, is the whole MongoDB connection string and is used as
+	// is: MongoHost/MongoPort/MongoUser and DBPassword are not assembled into
+	// one. Azure Cosmos DB for MongoDB vCore needs it - a mongodb+srv:// address
+	// with TLS required. MongoHost must still be set: it is what says the engine
+	// is prepared, and what the log shows.
+	MongoURI     string `json:"MongoURI"`
 	DBPassword   string `json:"DBPassword"`
 	DBName       string `json:"DBName"`
 	MySQLHost    string `json:"MySQLHost"`

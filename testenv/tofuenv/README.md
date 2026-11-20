@@ -1,8 +1,8 @@
 # cm-centipede OpenTofu-Based Migration Test Environment
 
 Create and destroy **object storage buckets, databases and VMs** on **AWS**,
-**NCP (Naver Cloud Platform)** and **Alibaba Cloud** using OpenTofu, with credentials
-held in OpenBao.
+**NCP (Naver Cloud Platform)**, **Alibaba Cloud** and **Azure** using OpenTofu, with
+credentials held in OpenBao.
 
 These resources exist to give cm-centipede something real to migrate. Each resource
 type is prepared and destroyed **independently** — you can create just a bucket,
@@ -17,10 +17,13 @@ just a VM, or just the databases.
 | aws | ✅ Ubuntu / Windows<br>(+ NFS via EFS, optional)<br>(+ servers on the VM, optional) | ✅ | ✅ | ✅ | ✅ | — |
 | ncp | ✅ | ✅ | ✅ | — | ✅ | ✅ |
 | alibaba | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| azure | ✅ | ✅ | ✅ | — | ✅ | ✅ |
 
 Every database in the table is a managed service. Each CSP is left with the engines it offers:
-AWS has no managed MongoDB and NCP has no managed MariaDB, so those two cells are empty.
-Alibaba offers all four (RDS for MySQL / MariaDB / PostgreSQL, ApsaraDB for MongoDB).
+AWS has no managed MongoDB, and NCP and Azure have no managed MariaDB, so those three cells
+are empty. Alibaba offers all four (RDS for MySQL / MariaDB / PostgreSQL, ApsaraDB for MongoDB).
+Azure Database for MariaDB was retired on 2025-09-19, so Azure has MySQL and PostgreSQL
+Flexible Server and Azure DocumentDB (Cosmos DB for MongoDB vCore).
 
 The AWS VM has three options of its own, all part of the `vm` resource rather than
 resources of their own — see [Step 3](#step-3--prepare-resources):
@@ -49,7 +52,8 @@ cp .env.example .env && chmod 600 .env    # then change every ChangeMe: AWS keys
 NCP needs three extra things. See [Step 4](#step-4--ncp-only-issue-the-public-domain)
 and the [CSPs at a glance](#csps-at-a-glance) table. Alibaba works like AWS from the
 command line (`./scripts/prepare.sh alibaba bucket`), with a network module created for
-it automatically as on NCP.
+it automatically as on NCP. Azure works like AWS too (`./scripts/prepare.sh azure vm`);
+its bucket needs a storage account you create first — see [Step 0](#step-0--prerequisites).
 
 ---
 
@@ -89,19 +93,20 @@ the `vault` provider.
 
 ## CSPs at a glance
 
-| | AWS | NCP | Alibaba |
-|---|---|---|---|
-| Bucket | S3 | Object Storage | OSS |
-| VM OS | Ubuntu 22.04, or Windows Server 2022 | Ubuntu 22.04 (`TF_VAR_ncp_server_image_name`) | Ubuntu 22.04 (`TF_VAR_alibaba_image_name_regex`) |
-| VM login account | `ubuntu` (`Administrator` on Windows) | **`root`** | **`root`** |
-| Servers installed on the VM | optional: MinIO, MySQL, MariaDB, PostgreSQL, MongoDB | — | — |
-| MySQL / PostgreSQL | RDS | Managed Cloud DB | ApsaraDB RDS |
-| MongoDB | **not prepared** as a managed DB (can run on the VM) | Managed Cloud DB (STAND_ALONE) | ApsaraDB for MongoDB (replica set, account **`root`**) |
-| MariaDB | RDS | **not prepared** | ApsaraDB RDS |
-| Network | default VPC, nothing to do | **a VPC is required — created and destroyed automatically** | **a VPC is required — created and destroyed automatically** |
-| Reaching a DB from outside | works immediately | **a public domain must be requested once, in the console** | works immediately (public endpoints are created by the module) |
-| DB engine version format | major.minor (`8.0`) | **full version (`8.0.36`)** | major.minor (`8.0`, `14.0`) |
-| Managed DB preparation time | a few minutes | **about 30 minutes** | RDS: a few minutes to ~20; MongoDB: 5-10 minutes |
+| | AWS | NCP | Alibaba | Azure |
+|---|---|---|---|---|
+| Bucket | S3 | Object Storage | OSS | Blob container, **in a storage account you create first** |
+| VM OS | Ubuntu 22.04, or Windows Server 2022 | Ubuntu 22.04 (`TF_VAR_ncp_server_image_name`) | Ubuntu 22.04 (`TF_VAR_alibaba_image_name_regex`) | Ubuntu 22.04 gen2 (`TF_VAR_azure_image_sku`) |
+| VM login account | `ubuntu` (`Administrator` on Windows) | **`root`** | **`root`** | **`azureuser`** (root is not allowed) |
+| Servers installed on the VM | optional: MinIO, MySQL, MariaDB, PostgreSQL, MongoDB | — | — | — |
+| MySQL / PostgreSQL | RDS | Managed Cloud DB | ApsaraDB RDS | Flexible Server |
+| MongoDB | **not prepared** as a managed DB (can run on the VM) | Managed Cloud DB (STAND_ALONE) | ApsaraDB for MongoDB (replica set, account **`root`**) | Azure DocumentDB / Cosmos DB for MongoDB vCore (`mongodb+srv://`, TLS) |
+| MariaDB | RDS | **not prepared** | ApsaraDB RDS | **not prepared** (service retired) |
+| Network | default VPC, nothing to do | **a VPC is required — created and destroyed automatically** | **a VPC is required — created and destroyed automatically** | the vm module builds its own VNet; no network module |
+| Resource group | — | — | — | one per module (`<prefix>-vm-rg`, `<prefix>-database-rg`), deleted by teardown |
+| Reaching a DB from outside | works immediately | **a public domain must be requested once, in the console** | works immediately (public endpoints are created by the module) | works immediately (public access + firewall rule) |
+| DB engine version format | major.minor (`8.0`) | **full version (`8.0.36`)** | major.minor (`8.0`, `14.0`) | MySQL `8.0.21` / `8.4`, PostgreSQL major (`14`), MongoDB `7.0` |
+| Managed DB preparation time | a few minutes | **about 30 minutes** | RDS: a few minutes to ~20; MongoDB: 5-10 minutes | not measured yet |
 
 ---
 
@@ -124,9 +129,19 @@ go version                  # only needed for Step 5 (test data)
 | AWS | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | IAM user with S3, RDS and EC2 permissions (plus EFS for the VM's optional NFS) |
 | NCP | `NCP_ACCESS_KEY`, `NCP_SECRET_KEY` | Portal > My Page > Manage Authentication Key |
 | Alibaba | `ALIBABA_ACCESS_KEY_ID`, `ALIBABA_ACCESS_KEY_SECRET` | RAM user AccessKey with OSS, ECS, VPC, RDS and MongoDB permissions |
+| Azure | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | A service principal: `az ad sp create-for-rbac --role Contributor --scopes /subscriptions/<id>` |
+| Azure (bucket) | `AZURE_S3_ACCESS_KEY`, `AZURE_S3_SECRET_KEY` | An **existing** storage account's name and one of its keys (portal: Storage account > Security + networking > Access keys) |
 
 NCP Object Storage and Alibaba OSS use the same key pair as the rest of their CSP —
 there is no separate S3 credential.
+
+**Azure is different on both counts.** Blob Storage has no S3 API, and gendata reaches it
+with the storage account's own name and key — `S3AccessKey` / `S3SecretKey` in cb-tumblebug
+and cb-spider. So the storage account is **not created by tofuenv**: create a StorageV2
+account in the portal first, and `tofu/azure/bucket` creates only the container in it. The
+service principal also has to register the resource providers each module uses
+(`Microsoft.Storage`, `.Compute`, `.Network`, `.DBforMySQL`, `.DBforPostgreSQL`,
+`.DocumentDB`) — azurerm 5.x no longer does it unasked; Contributor is allowed to.
 
 ---
 
@@ -206,6 +221,31 @@ The instance types, RDS classes and engine versions in `.env.example` are starti
 values; check what the zone actually sells with `./scripts/alibaba-db-versions.sh`
 once Step 2 is done.
 
+For Azure, add:
+
+```dotenv
+# Credentials - blanked automatically once stored in OpenBao (Step 2)
+AZURE_CLIENT_ID=your_client_id            # the service principal (appId)
+AZURE_CLIENT_SECRET=your_client_secret
+AZURE_TENANT_ID=your_tenant_id
+AZURE_SUBSCRIPTION_ID=your_subscription_id
+AZURE_S3_ACCESS_KEY=yourstorageaccount    # the existing storage account's NAME
+AZURE_S3_SECRET_KEY=its_access_key        # one of its keys (base64)
+AZURE_DB_PASSWORD=Cent1pede_2024          # shared by MySQL, PostgreSQL and MongoDB
+
+# Settings - kept as is
+TF_VAR_azure_region=koreacentral          # what Azure calls the location
+TF_VAR_azure_name_prefix=cptf             # short for "centipede tofu"
+TF_VAR_azure_bucket_name=cptf-azure-container-yourname   # container in that account
+TF_VAR_azure_db_name=testdb
+TF_VAR_azure_db_username=dbadmin
+```
+
+**The six Azure credential keys are registered together**, as one OpenBao secret
+(`secret/csp/azure`): fill in all six or none. `up.sh` refuses a partial set, which would
+otherwise blank the keys already stored. Check what the region sells with
+`./scripts/azure-db-versions.sh` once Step 2 is done.
+
 **The name prefix** is short for **centipede tofu** and names every resource this
 environment creates (`cptf-vm`, `cptf-mysql`, `cptf-rds-sg`, `cptf-vpc`, ...), so they
 are easy to tell apart from anything else in the account. Each CSP has its own key, and
@@ -216,11 +256,12 @@ they may hold different values:
 | `TF_VAR_aws_name_prefix` | 2-20 | An RDS identifier is capped at 63 and gets a `-postgres` suffix here |
 | `TF_VAR_ncp_name_prefix` | 2-10 | The managed MongoDB `service_name` is capped at 15, and `cptf-mongodb` is already 12 |
 | `TF_VAR_alibaba_name_prefix` | 2-20 | Kept the same as AWS; Alibaba's own name limits are far longer |
+| `TF_VAR_azure_name_prefix` | 2-12 | Names the resource groups and the DB servers, which also take a 6-character random suffix (`cptf-postgres-ab12cd`) |
 
 Lowercase letters, digits and hyphens, starting with a letter; a violation is rejected at
 plan time. **Buckets are not covered by the prefix** — an S3 name has to be globally
-unique, so `TF_VAR_aws_bucket_name`, `TF_VAR_ncp_bucket_name` and
-`TF_VAR_alibaba_bucket_name` are set in full.
+unique, so `TF_VAR_aws_bucket_name`, `TF_VAR_ncp_bucket_name`,
+`TF_VAR_alibaba_bucket_name` and `TF_VAR_azure_bucket_name` are set in full.
 
 Keep some room below those limits: NCP login keys append a role and a random suffix on
 top of the prefix (`cptf-vm-a1b2c3`), and the longest generated name is the prefix plus
@@ -238,6 +279,9 @@ accounts, so common names are already taken and the apply fails with
 `BucketAlreadyExists`. Append a date or your own identifier. Lowercase letters, digits
 and hyphens only, 3-63 characters. NCP bucket names must be unique within the region.
 Alibaba OSS names are globally unique across all Alibaba Cloud accounts, like S3.
+An Azure container name only has to be unique within its storage account, but each
+environment still needs its own, as on the other CSPs (lowercase, digits and hyphens,
+no `--`).
 
 **Use `dbadmin`, not `admin`, as the DB username.** PostgreSQL reserves `admin` and
 `rdsadmin`, so an apply using them fails. `dbadmin` is safe on all engines and is the
@@ -262,6 +306,18 @@ anything is prepared:
   builds — and anything not listed above
 - quote it in single quotes in `.env` when it has a special character
 - example: `Cent1pede_2024`
+
+**The Azure DB password rules are enforced the same way.** MySQL, PostgreSQL and
+MongoDB share `AZURE_DB_PASSWORD`:
+
+- 8 to 128 characters
+- at least three of: uppercase, lowercase, digits, special characters
+- allowed special characters: `! $ ^ & * ( ) _ + - =`
+- it must not contain `TF_VAR_azure_db_username` (Azure refuses that), in any case
+- example: `Cent1pede_2024`
+
+Azure also refuses some admin names — `admin`, `administrator`, `root`, `azure_superuser`,
+`guest`, `public` and `pg_*`; the module rejects them at plan time.
 
 **An AWS engine version the region does not offer fails the apply.** RDS is looser than
 NCP about the format — it accepts both a prefix (`8.0`) and a full version (`8.0.42`),
@@ -300,6 +356,14 @@ MongoDB versions and classes are not in the provider's catalog, so
 `./scripts/alibaba-db-versions.sh mongodb` asks the Alibaba Cloud API for them through
 the `aliyun` CLI in the runner; they are sold per version, node count
 (`TF_VAR_alibaba_mongodb_replication_factor`), storage type and zone.
+
+**Azure SKUs come as `<tier>_<size>`** — `B_Standard_B1ms` is the Burstable edition's
+smallest size — and `./scripts/azure-db-versions.sh` lists the ones the subscription can
+use in the region, along with the VM sizes. Azure publishes no list of the MongoDB
+(DocumentDB) versions or tiers it sells, so for those the script shows what azurerm
+accepts — anything else is refused at plan time — and the clusters already in the
+subscription. A tier at `M30` or above cannot be scaled back down to the burstable
+`M10` / `M20` / `M25`.
 
 Leave `VAULT_TOKEN` empty — Step 2 fills it in.
 
@@ -348,6 +412,7 @@ re-running `up.sh` is safe.
 | `aws` | `bucket`, `vm`, `database` |
 | `ncp` | `bucket`, `vm`, `database` |
 | `alibaba` | `bucket`, `vm`, `database` |
+| `azure` | `bucket`, `vm`, `database` |
 
 **Running the same command twice is safe.** A resource that already holds tofu state is
 reported and skipped, so nothing is created and nothing is charged:
@@ -375,6 +440,7 @@ engines named, comma-separated, using the same names as `gen-data.sh --engine`:
 | `aws` | `mysql`, `mariadb`, `postgresql` |
 | `ncp` | `mysql`, `postgresql`, `mongodb` |
 | `alibaba` | `mysql`, `mariadb`, `postgresql`, `mongodb` |
+| `azure` | `mysql`, `postgresql`, `mongodb` |
 
 ```bash
 ./scripts/prepare.sh aws database --engine postgresql          # PostgreSQL only
@@ -569,6 +635,37 @@ database module, and access is limited by each instance's IP whitelist
 (`TF_VAR_allowed_cidr`). The MongoDB host is the replica set Primary's public address,
 and its account is always `root` — `gen-data.sh` passes it to gendata on its own.
 
+**Azure** — the same three resources, in any order:
+
+```bash
+./scripts/azure-db-versions.sh            # optional: DB versions and SKUs, VM sizes, images
+./scripts/prepare.sh azure bucket         # the container, in the existing storage account
+./scripts/prepare.sh azure vm
+./scripts/prepare.sh azure database       # MySQL + PostgreSQL Flexible Server, MongoDB vCore (or --engine)
+```
+
+**Sizing on Azure** — all set in `.env`:
+
+| What | Variable | `.env.example` value |
+|---|---|---|
+| VM size | `TF_VAR_azure_vm_size` | `Standard_B2s` (2 vCPU / 4 GB) — list with `./scripts/azure-db-versions.sh server` |
+| VM OS disk (GB) | `TF_VAR_azure_vm_volume_size`, `_disk_type` | `30` (30 or more), `StandardSSD_LRS`. The VM's only disk; fixed at creation |
+| VM image | `TF_VAR_azure_image_offer`, `_sku` | Canonical `0001-com-ubuntu-server-jammy` / `22_04-lts-gen2` (needs a size with Hyper-V gen V2) |
+| MySQL | `TF_VAR_azure_mysql_sku`, `_storage_gb` | `B_Standard_B1ms` (1 vCore / 2 GB), `20` (20-16384) |
+| PostgreSQL | `TF_VAR_azure_postgres_sku`, `_storage_gb` | `B_Standard_B1ms`, `32` (fixed sizes: 32, 64, 128, ...) |
+| MongoDB vCore | `TF_VAR_azure_mongodb_tier`, `_storage_gb`, `_high_availability` | `M30` (2 vCore / 8 GB), `32`, `Disabled` |
+
+There is **no network module on Azure**. `tofu/azure/vm` puts the VM's VNet, subnet, NSG
+and public IP in its own resource group, `<prefix>-vm-rg`; `tofu/azure/database` puts the
+three servers in `<prefix>-database-rg`, with public access limited by a firewall rule
+(`TF_VAR_allowed_cidr`, turned into the IP range Azure takes). The database servers' names
+are DNS names unique across Azure, so they carry a random suffix kept in state.
+
+MongoDB vCore hands out a `mongodb+srv://` connection string with TLS required. The
+module outputs it as `mongodb_uri` and `gen-data.sh` passes it to gendata as is, instead
+of a host and port. MySQL's `log_bin_trust_function_creators` is ON by default on Azure,
+so the fixture's functions and triggers load with no parameter set.
+
 Connection info is printed automatically when an apply finishes.
 
 **How long to expect:**
@@ -582,6 +679,7 @@ Connection info is printed automatically when an apply finishes.
 | `aws database` | several minutes |
 | `ncp database` | **about 30 minutes** — do not interrupt it |
 | `alibaba database` | RDS several minutes to ~20 each, MongoDB 5–10 minutes (they are created in parallel) |
+| `azure database` | not measured yet; Flexible Server can take tens of minutes. The engines are created in parallel |
 
 The NCP managed database resources have no update path: every attribute forces
 replacement. Changing one variable re-creates the database and costs another 30
@@ -777,7 +875,7 @@ of accumulating copies. A summary of the last run is written per environment, to
 ### `conn-info.sh` — everything at once (recommended)
 
 ```
-./scripts/conn-info.sh [aws|ncp|alibaba] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]
+./scripts/conn-info.sh [aws|ncp|alibaba|azure] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]
 ```
 
 ```bash
@@ -883,6 +981,14 @@ On Alibaba, likewise — its `network` module is handled the same way:
 ./scripts/teardown.sh alibaba bucket
 ```
 
+On Azure, likewise — there is no network module to clean up:
+
+```bash
+./scripts/teardown.sh azure database     # deletes <prefix>-database-rg with the servers
+./scripts/teardown.sh azure vm           # deletes <prefix>-vm-rg with the VM and its network
+./scripts/teardown.sh azure bucket       # deletes the container only - see below
+```
+
 **One database engine at a time** — `--engine` destroys just the engines named; the
 others keep running:
 
@@ -890,11 +996,12 @@ others keep running:
 ./scripts/teardown.sh aws database --engine postgresql
 ./scripts/teardown.sh ncp database --engine mongodb
 ./scripts/teardown.sh alibaba database --engine mariadb
+./scripts/teardown.sh azure database --engine mongodb
 ```
 
 - It is a targeted destroy of those engines' own resources (the instance, plus its
-  parameter group on AWS, its ACG rule on NCP, or its account, database and public
-  endpoint on Alibaba). The engines that stay are not re-applied, so a `.env` change
+  parameter group on AWS, its ACG rule on NCP, its account, database and public
+  endpoint on Alibaba, or its database and firewall rule on Azure). The engines that stay are not re-applied, so a `.env` change
   made since cannot re-create them.
 - Removing the **last** engine left destroys the whole database module — subnet group
   and security group included — exactly like a run without `--engine`.
@@ -924,6 +1031,11 @@ multipart uploads included) and run the command again.
 **`alibaba bucket` is not emptied first.** `tofu/alibaba/bucket` sets `force_destroy`
 on `alicloud_oss_bucket`, as AWS does, so the destroy deletes the objects itself and no
 go is needed.
+
+**`azure bucket` deletes the container, not the storage account.** The container goes with
+every blob in it, so nothing has to be emptied first. The storage account
+(`AZURE_S3_ACCESS_KEY`) was there before tofuenv and stays, with any other container in it.
+`azure vm` and `azure database` delete their whole resource group instead.
 
 A destroy that fails is **retried once, 60 seconds later** (`destroy failed — retry 1/1
 in 60s`). NCP answers some delete calls with a 500 while the resource is still being
