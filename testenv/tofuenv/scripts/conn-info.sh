@@ -2,10 +2,10 @@
 # ==============================================================================
 # conn-info.sh — print the connection info of the prepared resources
 # ------------------------------------------------------------------------------
-#   ./scripts/conn-info.sh [aws|ncp|alibaba|azure] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]
+#   ./scripts/conn-info.sh [aws|ncp|alibaba|azure|gcp] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]
 #
 #   Arguments:
-#     csp       : aws | ncp | alibaba | azure (default: all of them)
+#     csp       : aws | ncp | alibaba | azure | gcp (default: all of them)
 #     resource  : bucket | vm | database | all (default: all)
 #                 ncp and alibaba also accept: network
 #     --prefix  : only the environment of that prefix (default: every prefix)
@@ -33,7 +33,7 @@ set -euo pipefail
 RUNNER="tofuenv-runner"
 GREEN='\033[0;32m'; RED='\033[0;31m'; CYAN='\033[0;36m'; YELLOW='\033[0;33m'; NC='\033[0m'
 
-usage() { echo "Usage: $0 [aws|ncp|alibaba|azure] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]" >&2; exit 1; }
+usage() { echo "Usage: $0 [aws|ncp|alibaba|azure|gcp] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]" >&2; exit 1; }
 
 CSP_ARG=""
 RESOURCE="all"
@@ -48,7 +48,7 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || { echo -e "${RED}--prefix needs a value${NC}" >&2; usage; }
             PREFIX_ARG="$2"; shift ;;
         --prefix=*)                     PREFIX_ARG="${1#--prefix=}" ;;
-        aws|ncp|alibaba|azure)          CSP_ARG="$1" ;;
+        aws|ncp|alibaba|azure|gcp)      CSP_ARG="$1" ;;
         network|bucket|vm|database|all) RESOURCE="$1" ;;
         *) echo -e "${RED}unknown argument: $1${NC}" >&2; usage ;;
     esac
@@ -61,6 +61,9 @@ fi
 if [ "$CSP_ARG" = "azure" ] && [ "$RESOURCE" = "network" ]; then
     echo -e "${RED}azure has no network module (the vm module builds its own VNet).${NC}" >&2; exit 1
 fi
+if [ "$CSP_ARG" = "gcp" ] && [ "$RESOURCE" = "network" ]; then
+    echo -e "${RED}gcp has no network module (the vm module builds its own VPC).${NC}" >&2; exit 1
+fi
 
 # The CSPs to look at: the one named, or all. network exists on NCP and Alibaba only.
 if [ -n "$CSP_ARG" ]; then
@@ -68,7 +71,7 @@ if [ -n "$CSP_ARG" ]; then
 elif [ "$RESOURCE" = "network" ]; then
     CSPS="ncp alibaba"
 else
-    CSPS="aws ncp alibaba azure"
+    CSPS="aws ncp alibaba azure gcp"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -97,6 +100,7 @@ sensitive_outputs() {
                 ncp)     echo "db_password mysql_connection_uri postgres_connection_uri mongodb_connection_uri" ;;
                 alibaba) echo "db_password mysql_connection_uri mariadb_connection_uri postgres_connection_uri mongodb_connection_uri" ;;
                 azure)   echo "db_password mysql_connection_uri postgres_connection_uri mongodb_connection_uri" ;;
+                gcp)     echo "db_password mysql_connection_uri postgres_connection_uri" ;;
                 *)       echo "db_password mysql_connection_uri mariadb_connection_uri postgres_connection_uri" ;;
             esac
             ;;
@@ -224,7 +228,7 @@ for CSP in $CSPS; do
 done
 
 if [ "$SHOWN" -eq 0 ]; then
-    what="${CSP_ARG:-aws/ncp/alibaba/azure} ${RESOURCE}"
+    what="${CSP_ARG:-aws/ncp/alibaba/azure/gcp} ${RESOURCE}"
     if [ -n "$PREFIX_ARG" ]; then
         echo -e "${YELLOW}Nothing prepared for ${what} under prefix '${PREFIX_ARG}'.${NC}" >&2
     else

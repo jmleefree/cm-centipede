@@ -47,13 +47,13 @@ if [ -z "$ROWS" ]; then
 fi
 
 printf '  %-7s  %-12s  %-6s  %-3s  %-8s  %s\n' CSP PREFIX bucket vm database network
-for csp in aws ncp alibaba azure; do
+for csp in aws ncp alibaba azure gcp; do
     current="$(ws_current "$csp")"
     for ws in $(printf '%s\n' "$ROWS" | awk -v c="$csp" '$1 == c { print $3 }' | sort -u); do
         cells=()
         for mod in bucket vm database network; do
-            # aws and azure have no network module, so the cell stays blank.
-            if { [ "$csp" = "aws" ] || [ "$csp" = "azure" ]; } && [ "$mod" = "network" ]; then
+            # aws, azure and gcp have no network module, so the cell stays blank.
+            if { [ "$csp" = "aws" ] || [ "$csp" = "azure" ] || [ "$csp" = "gcp" ]; } && [ "$mod" = "network" ]; then
                 cells+=("")
             elif printf '%s\n' "$ROWS" | grep -qxF "$csp $mod $ws"; then
                 cells+=("yes")

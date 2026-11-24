@@ -13,6 +13,9 @@
 #     secret/csp/azure   <- AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID,
 #                           AZURE_SUBSCRIPTION_ID, AZURE_S3_ACCESS_KEY, AZURE_S3_SECRET_KEY
 #     secret/db/azure    <- AZURE_DB_PASSWORD  (MySQL, PostgreSQL and MongoDB share it)
+#     secret/csp/gcp     <- GCP_CLIENT_ID, GCP_CLIENT_EMAIL, GCP_PRIVATE_KEY_ID,
+#                           GCP_PRIVATE_KEY, GCP_PROJECT_ID, GCP_S3_ACCESS_KEY, GCP_S3_SECRET_KEY
+#     secret/db/gcp      <- GCP_DB_PASSWORD  (MySQL and PostgreSQL share it)
 #
 #   Idempotency:
 #     - A group is skipped when its "trigger" key is empty, so re-running after
@@ -228,6 +231,85 @@ if [ -n "$azure_set" ] && [ -n "$azure_missing" ]; then
     exit 1
 fi
 
+# Validate the GCP DB password. Cloud SQL for MySQL and PostgreSQL share it. Cloud
+# SQL sets no rule of its own unless a password policy is configured, so this is
+# the Azure rule with a 64-character cap: at least three of uppercase / lowercase /
+# digit / special, specials only from ! $ ^ & * ( ) _ + - = so the connection URIs
+# hold it unescaped.
+validate_gcp_db_password() {
+    local pw="$1"
+    local len=${#pw}
+    local kinds=0
+    if [ "$len" -lt 8 ] || [ "$len" -gt 64 ]; then
+        echo "must be 8-64 characters (currently ${len})"; return 1
+    fi
+    if printf '%s' "$pw" | LC_ALL=C grep -q '[^A-Za-z0-9!$^&*()_+=-]'; then
+        echo "may contain only letters, digits and ! \$ ^ & * ( ) _ + - ="; return 1
+    fi
+    printf '%s' "$pw" | LC_ALL=C grep -q '[A-Z]'           && kinds=$((kinds + 1))
+    printf '%s' "$pw" | LC_ALL=C grep -q '[a-z]'           && kinds=$((kinds + 1))
+    printf '%s' "$pw" | LC_ALL=C grep -q '[0-9]'           && kinds=$((kinds + 1))
+    printf '%s' "$pw" | LC_ALL=C grep -q '[!$^&*()_+=-]'   && kinds=$((kinds + 1))
+    if [ "$kinds" -lt 3 ]; then
+        echo "must mix at least three of uppercase, lowercase, digits and special characters (has ${kinds})"; return 1
+    fi
+    return 0
+}
+
+if [ -n "${GCP_DB_PASSWORD:-}" ]; then
+    if ! reason=$(validate_gcp_db_password "$GCP_DB_PASSWORD"); then
+        echo -e "  ${RED}FAIL${NC} GCP_DB_PASSWORD rejected: ${reason}" >&2
+        echo -e "  ${YELLOW}See the GCP password rules in .env.example.${NC}" >&2
+        exit 1
+    fi
+    echo -e "  ${GREEN}OK${NC}   GCP_DB_PASSWORD passed the MySQL + PostgreSQL rule check"
+fi
+
+# secret/csp/gcp holds seven keys and is replaced as a whole, as for Azure: once
+# any of them is set, all seven must be.
+GCP_CSP_KEYS="GCP_CLIENT_ID GCP_CLIENT_EMAIL GCP_PRIVATE_KEY_ID GCP_PRIVATE_KEY GCP_PROJECT_ID GCP_S3_ACCESS_KEY GCP_S3_SECRET_KEY"
+gcp_set="" gcp_missing=""
+for k in $GCP_CSP_KEYS; do
+    if [ -n "${!k:-}" ]; then gcp_set="$gcp_set $k"; else gcp_missing="$gcp_missing $k"; fi
+done
+if [ -n "$gcp_set" ] && [ -n "$gcp_missing" ]; then
+    echo -e "  ${RED}FAIL${NC} secret/csp/gcp needs all seven keys at once; these are empty:${gcp_missing}" >&2
+    echo -e "  ${YELLOW}It is stored as one secret, so a partial registration would blank the others.${NC}" >&2
+    exit 1
+fi
+
+# Check the service account fields have the shape of a JSON key's, so a value
+# pasted into the wrong key - or a private key with real newlines - is caught here
+# rather than as an authentication error at the first apply. GCP_PRIVATE_KEY is
+# kept as .env holds it, one line with literal \n (cb-tumblebug's format); the
+# modules turn those into newlines.
+validate_gcp_service_account() {
+    local pk="$GCP_PRIVATE_KEY"
+    printf '%s' "$GCP_CLIENT_ID" | LC_ALL=C grep -qx '[0-9]\{10,30\}' \
+        || { echo "GCP_CLIENT_ID must be the numeric client_id (unique ID) of the service account"; return 1; }
+    printf '%s' "$GCP_CLIENT_EMAIL" | LC_ALL=C grep -qx '[^@[:space:]]\{1,\}@[^@[:space:]]\{1,\}' \
+        || { echo "GCP_CLIENT_EMAIL must be the client_email of the service account (name@project.iam.gserviceaccount.com)"; return 1; }
+    printf '%s' "$GCP_PRIVATE_KEY_ID" | LC_ALL=C grep -qx '[0-9a-f]\{40\}' \
+        || { echo "GCP_PRIVATE_KEY_ID must be the 40-character hex private_key_id of the key"; return 1; }
+    printf '%s' "$GCP_PROJECT_ID" | LC_ALL=C grep -qx '[a-z][a-z0-9-]\{4,28\}[a-z0-9]' \
+        || { echo "GCP_PROJECT_ID must be the project ID (6-30 lowercase letters, digits, hyphens), not the project name or number"; return 1; }
+    case "$pk" in
+        '-----BEGIN PRIVATE KEY-----\n'*'\n-----END PRIVATE KEY-----'*) ;;
+        *)
+            echo "GCP_PRIVATE_KEY must be the private_key of the JSON key on one line, '-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n'"; return 1 ;;
+    esac
+    return 0
+}
+
+if [ -n "$gcp_set" ]; then
+    if ! reason=$(validate_gcp_service_account); then
+        echo -e "  ${RED}FAIL${NC} secret/csp/gcp rejected: ${reason}" >&2
+        echo -e "  ${YELLOW}See the GCP service account notes in .env.example.${NC}" >&2
+        exit 1
+    fi
+    echo -e "  ${GREEN}OK${NC}   GCP service account fields look like a JSON key's"
+fi
+
 # Validate the aws VM server password against the rules tofu/aws/vm enforces:
 # 8+ characters (MinIO's minimum) and none of ' " ` \ $ or whitespace, since the
 # install scripts write it into SQL, bash, PowerShell, YAML and XML unquoted.
@@ -271,6 +353,11 @@ register_group "csp/azure" "AZURE_CLIENT_SECRET" \
     AZURE_S3_ACCESS_KEY AZURE_S3_SECRET_KEY
 register_group "db/azure" "AZURE_DB_PASSWORD" \
     AZURE_DB_PASSWORD
+register_group "csp/gcp" "GCP_PRIVATE_KEY" \
+    GCP_CLIENT_ID GCP_CLIENT_EMAIL GCP_PRIVATE_KEY_ID GCP_PRIVATE_KEY GCP_PROJECT_ID \
+    GCP_S3_ACCESS_KEY GCP_S3_SECRET_KEY
+register_group "db/gcp" "GCP_DB_PASSWORD" \
+    GCP_DB_PASSWORD
 
 # Blank the keys that were registered successfully
 if [ "${#KEYS_TO_BLANK[@]}" -gt 0 ]; then
@@ -291,3 +378,4 @@ echo "  Verify:  curl -s -H \"X-Vault-Token: \$VAULT_TOKEN\" ${VAULT_ADDR}/v1/se
 echo "           curl -s -H \"X-Vault-Token: \$VAULT_TOKEN\" ${VAULT_ADDR}/v1/secret/data/csp/ncp | jq .data.data"
 echo "           curl -s -H \"X-Vault-Token: \$VAULT_TOKEN\" ${VAULT_ADDR}/v1/secret/data/csp/alibaba | jq .data.data"
 echo "           curl -s -H \"X-Vault-Token: \$VAULT_TOKEN\" ${VAULT_ADDR}/v1/secret/data/csp/azure | jq .data.data"
+echo "           curl -s -H \"X-Vault-Token: \$VAULT_TOKEN\" ${VAULT_ADDR}/v1/secret/data/csp/gcp | jq .data.data"

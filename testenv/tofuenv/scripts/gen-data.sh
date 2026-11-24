@@ -14,6 +14,7 @@
 #     ./scripts/gen-data.sh --provider ncp --target all         # NCP resources
 #     ./scripts/gen-data.sh --provider alibaba --target all     # Alibaba resources
 #     ./scripts/gen-data.sh --provider azure --target all       # Azure resources
+#     ./scripts/gen-data.sh --provider gcp --target all         # GCP resources
 #     ./scripts/gen-data.sh --target all --dry-run             # generate only, skip upload/transfer/load
 #     ./scripts/gen-data.sh --target bucket --force            # skip the existing-data check
 #     ./scripts/gen-data.sh --source vm --target database      # the DBs installed ON the aws VM
@@ -145,8 +146,8 @@ if [ "$HELP" -eq 1 ]; then
 fi
 
 case "$PROVIDER" in
-    aws|ncp|alibaba|azure) ;;
-    *) die "unknown provider '${PROVIDER}' (aws|ncp|alibaba|azure)" ;;
+    aws|ncp|alibaba|azure|gcp) ;;
+    *) die "unknown provider '${PROVIDER}' (aws|ncp|alibaba|azure|gcp)" ;;
 esac
 case "$SOURCE" in
     managed) ;;
@@ -300,6 +301,9 @@ elif want bucket; then
         # azblob client takes as AccessKey and SecretKey (cb-spider's S3AccessKey /
         # S3SecretKey). Not the service principal: that one drives tofu only.
         azure)   AK_KEY="AZURE_S3_ACCESS_KEY"; SK_KEY="AZURE_S3_SECRET_KEY" ;;
+        # GCS: the HMAC key of Cloud Storage interoperability, which the S3-compatible
+        # API signs with. Not the service account: that one drives tofu only.
+        gcp)     AK_KEY="GCP_S3_ACCESS_KEY"; SK_KEY="GCP_S3_SECRET_KEY" ;;
         *)       AK_KEY="AWS_ACCESS_KEY_ID"; SK_KEY="AWS_SECRET_ACCESS_KEY" ;;
     esac
     if ! ACCESS_KEY="$(vault_read "csp/${PROVIDER}" "$AK_KEY")"; then
@@ -407,6 +411,7 @@ elif want database; then
     #        gendata skip the check, as it does for an unknown VM volume.
     #   alibaba  the smaller of the RDS and MongoDB storage, since one figure
     #        has to cover every engine a run may load.
+    #   azure / gcp  the smallest of the engines' storage, for the same reason.
     case "$PROVIDER" in
         aws) DB_STORAGE_GB="${TF_VAR_aws_db_allocated_storage:-20}" ;;
         ncp) DB_STORAGE_GB=0 ;;
@@ -416,12 +421,17 @@ elif want database; then
                 DB_STORAGE_GB="${TF_VAR_alibaba_mongodb_storage:-20}"
             fi
             ;;
-        # azure: the smallest of the three engines' storage, for the same reason.
         azure)
             DB_STORAGE_GB="${TF_VAR_azure_mysql_storage_gb:-20}"
             for s in "${TF_VAR_azure_postgres_storage_gb:-32}" "${TF_VAR_azure_mongodb_storage_gb:-32}"; do
                 if [ "$s" -lt "$DB_STORAGE_GB" ]; then DB_STORAGE_GB="$s"; fi
             done
+            ;;
+        gcp)
+            DB_STORAGE_GB="${TF_VAR_gcp_mysql_storage_gb:-20}"
+            if [ "${TF_VAR_gcp_postgres_storage_gb:-20}" -lt "$DB_STORAGE_GB" ]; then
+                DB_STORAGE_GB="${TF_VAR_gcp_postgres_storage_gb:-20}"
+            fi
             ;;
     esac
 fi
@@ -464,14 +474,14 @@ if want filesystem; then
     printf '%s' "$INPUTS" | jq -r '"  vm         : " + (if .VMHost == "" then "-" else .VMUser + "@" + .VMHost end)'
 fi
 if want database; then
-    # Only the engines the source actually serves: managed AWS has no MongoDB and
-    # NCP has no MariaDB, so listing them would print a "-" for something never
-    # prepared. The VM can run all four.
+    # Only the engines the source actually serves: managed AWS and GCP have no
+    # MongoDB and NCP has no MariaDB, so listing them would print a "-" for
+    # something never prepared. The VM can run all four.
     printf '%s' "$INPUTS" | jq -r '
         "  mysql      : " + (if .MySQLHost == "" then "-" else .MySQLHost + ":" + .MySQLPort end),
         "  postgresql : " + (if .PostgresHost == "" then "-" else .PostgresHost + ":" + .PostgresPort end)'
     # The URI itself carries the password, so only the host is shown for it.
-    if [ "$PROVIDER" != "aws" ] || [ "$SOURCE" = "vm" ]; then
+    if { [ "$PROVIDER" != "aws" ] && [ "$PROVIDER" != "gcp" ]; } || [ "$SOURCE" = "vm" ]; then
         printf '%s' "$INPUTS" | jq -r '"  mongodb    : " + (if .MongoHost == "" then "-"
             elif .MongoURI != "" then .MongoHost + " (connection string)"
             else .MongoHost + ":" + .MongoPort end)'

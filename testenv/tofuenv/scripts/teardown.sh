@@ -7,6 +7,7 @@
 #     ncp     : bucket | vm | database
 #     alibaba : bucket | vm | database
 #     azure   : bucket | vm | database
+#     gcp     : bucket | vm | database
 #
 #   Examples:
 #     ./scripts/teardown.sh aws database
@@ -16,7 +17,8 @@
 #   One engine at a time (database only):
 #     --engine destroys just the engines named; the others keep running untouched.
 #     aws: mysql | mariadb | postgresql, ncp: mysql | postgresql | mongodb,
-#     alibaba: mysql | mariadb | postgresql | mongodb, azure: mysql | postgresql | mongodb.
+#     alibaba: mysql | mariadb | postgresql | mongodb, azure: mysql | postgresql | mongodb,
+#     gcp: mysql | postgresql.
 #     It is a targeted destroy of those engines' own resources (see
 #     db_engine_targets in scripts/lib/db-engines.sh), not an apply of the shorter
 #     engine list: an apply would also roll any .env change into the engines that
@@ -82,6 +84,12 @@
 #       account (AZURE_S3_ACCESS_KEY) existed before and is left in place.
 #     - azure/vm and azure/database delete their resource group, and with it
 #       everything in it. There is no network module to clean up.
+#
+#   GCP notes:
+#     - gcp/bucket is NOT emptied first: google_storage_bucket sets force_destroy,
+#       so the destroy deletes the objects itself. The HMAC key is left in place.
+#     - gcp/vm deletes its own VPC with the VM. There is no network module to
+#       clean up. The project APIs are left enabled, as they were found.
 # ==============================================================================
 set -euo pipefail
 
@@ -95,12 +103,14 @@ Usage: teardown.sh <csp> <resource> [--engine e1,e2]
   ncp     : bucket | vm | database
   alibaba : bucket | vm | database
   azure   : bucket | vm | database
+  gcp     : bucket | vm | database
 
   --engine (database only) destroys just the engines named; the others stay.
     aws     : mysql | mariadb | postgresql
     ncp     : mysql | postgresql | mongodb
     alibaba : mysql | mariadb | postgresql | mongodb
     azure   : mysql | postgresql | mongodb
+    gcp     : mysql | postgresql
   Removing the last engine destroys the whole database module.
 
   ncp/network and alibaba/network are destroyed automatically once neither vm nor
@@ -132,8 +142,8 @@ done
 [ -z "$CSP" ] || [ -z "$RESOURCE" ] && usage
 
 case "$CSP" in
-    aws|ncp|alibaba|azure) ;;
-    *) echo "invalid csp: $CSP (supported: aws, ncp, alibaba, azure)" >&2; usage ;;
+    aws|ncp|alibaba|azure|gcp) ;;
+    *) echo "invalid csp: $CSP (supported: aws, ncp, alibaba, azure, gcp)" >&2; usage ;;
 esac
 
 case "$RESOURCE" in

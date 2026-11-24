@@ -23,6 +23,7 @@ db_all_engines() {
         ncp)     echo "mysql postgres mongodb" ;;
         alibaba) echo "mysql mariadb postgres mongodb" ;;
         azure)   echo "mysql postgres mongodb" ;;
+        gcp)     echo "mysql postgres" ;;
     esac
 }
 
@@ -103,6 +104,8 @@ db_state_engines() {
         # azurerm_postgresql_flexible_server.postgres, azurerm_mongo_cluster.mongodb.
         azure)   re='^azurerm_(mysql_flexible_server|postgresql_flexible_server|mongo_cluster)\.(mysql|postgres|mongodb)(\[0\])?$'
                  grp='\2' ;;
+        # The instances only: google_sql_database_instance.mysql / .postgres.
+        gcp)     re='^google_sql_database_instance\.(mysql|postgres)(\[0\])?$' ;;
     esac
     ws_exec bash -c '
         cd "/work/'"$mod"'" 2>/dev/null || exit 0
@@ -138,6 +141,8 @@ db_engine_targets() {
             azure:mysql)     out="$out -target=azurerm_mysql_flexible_server.mysql" ;;
             azure:postgres)  out="$out -target=azurerm_postgresql_flexible_server.postgres" ;;
             azure:mongodb)   out="$out -target=azurerm_mongo_cluster.mongodb" ;;
+            # The instance takes its database and user along.
+            gcp:*)           out="$out -target=google_sql_database_instance.$e" ;;
         esac
     done
     echo "${out# }"

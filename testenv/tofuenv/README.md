@@ -1,7 +1,7 @@
 # cm-centipede OpenTofu-Based Migration Test Environment
 
 Create and destroy **object storage buckets, databases and VMs** on **AWS**,
-**NCP (Naver Cloud Platform)**, **Alibaba Cloud** and **Azure** using OpenTofu, with
+**NCP (Naver Cloud Platform)**, **Alibaba Cloud**, **Azure** and **GCP** using OpenTofu, with
 credentials held in OpenBao.
 
 These resources exist to give cm-centipede something real to migrate. Each resource
@@ -18,12 +18,14 @@ just a VM, or just the databases.
 | ncp | ✅ | ✅ | ✅ | — | ✅ | ✅ |
 | alibaba | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | azure | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| gcp | ✅ | ✅ | ✅ | — | ✅ | — |
 
 Every database in the table is a managed service. Each CSP is left with the engines it offers:
-AWS has no managed MongoDB, and NCP and Azure have no managed MariaDB, so those three cells
-are empty. Alibaba offers all four (RDS for MySQL / MariaDB / PostgreSQL, ApsaraDB for MongoDB).
+AWS and GCP have no managed MongoDB, and NCP, Azure and GCP have no managed MariaDB, so those
+five cells are empty. Alibaba offers all four (RDS for MySQL / MariaDB / PostgreSQL, ApsaraDB for MongoDB).
 Azure Database for MariaDB was retired on 2025-09-19, so Azure has MySQL and PostgreSQL
-Flexible Server and Azure DocumentDB (Cosmos DB for MongoDB vCore).
+Flexible Server and Azure DocumentDB (Cosmos DB for MongoDB vCore). GCP has Cloud SQL for
+MySQL and PostgreSQL; its Firestore with MongoDB compatibility is not MongoDB, so it is not used.
 
 The AWS VM has three options of its own, all part of the `vm` resource rather than
 resources of their own — see [Step 3](#step-3--prepare-resources):
@@ -54,6 +56,8 @@ and the [CSPs at a glance](#csps-at-a-glance) table. Alibaba works like AWS from
 command line (`./scripts/prepare.sh alibaba bucket`), with a network module created for
 it automatically as on NCP. Azure works like AWS too (`./scripts/prepare.sh azure vm`);
 its bucket needs a storage account you create first — see [Step 0](#step-0--prerequisites).
+GCP works like AWS as well (`./scripts/prepare.sh gcp vm`), once its APIs are enabled and an
+HMAC key is made for the bucket — see [Step 0](#step-0--prerequisites).
 
 ---
 
@@ -93,20 +97,20 @@ the `vault` provider.
 
 ## CSPs at a glance
 
-| | AWS | NCP | Alibaba | Azure |
-|---|---|---|---|---|
-| Bucket | S3 | Object Storage | OSS | Blob container, **in a storage account you create first** |
-| VM OS | Ubuntu 22.04, or Windows Server 2022 | Ubuntu 22.04 (`TF_VAR_ncp_server_image_name`) | Ubuntu 22.04 (`TF_VAR_alibaba_image_name_regex`) | Ubuntu 22.04 gen2 (`TF_VAR_azure_image_sku`) |
-| VM login account | `ubuntu` (`Administrator` on Windows) | **`root`** | **`root`** | **`azureuser`** (root is not allowed) |
-| Servers installed on the VM | optional: MinIO, MySQL, MariaDB, PostgreSQL, MongoDB | — | — | — |
-| MySQL / PostgreSQL | RDS | Managed Cloud DB | ApsaraDB RDS | Flexible Server |
-| MongoDB | **not prepared** as a managed DB (can run on the VM) | Managed Cloud DB (STAND_ALONE) | ApsaraDB for MongoDB (replica set, account **`root`**) | Azure DocumentDB / Cosmos DB for MongoDB vCore (`mongodb+srv://`, TLS) |
-| MariaDB | RDS | **not prepared** | ApsaraDB RDS | **not prepared** (service retired) |
-| Network | default VPC, nothing to do | **a VPC is required — created and destroyed automatically** | **a VPC is required — created and destroyed automatically** | the vm module builds its own VNet; no network module |
-| Resource group | — | — | — | one per module (`<prefix>-vm-rg`, `<prefix>-database-rg`), deleted by teardown |
-| Reaching a DB from outside | works immediately | **a public domain must be requested once, in the console** | works immediately (public endpoints are created by the module) | works immediately (public access + firewall rule) |
-| DB engine version format | major.minor (`8.0`) | **full version (`8.0.36`)** | major.minor (`8.0`, `14.0`) | MySQL `8.0.21` / `8.4`, PostgreSQL major (`14`), MongoDB `7.0` |
-| Managed DB preparation time | a few minutes | **about 30 minutes** | RDS: a few minutes to ~20; MongoDB: 5-10 minutes | not measured yet |
+| | AWS | NCP | Alibaba | Azure | GCP |
+|---|---|---|---|---|---|
+| Bucket | S3 | Object Storage | OSS | Blob container, **in a storage account you create first** | Cloud Storage bucket (S3-compatible API, **with an HMAC key you create first**) |
+| VM OS | Ubuntu 22.04, or Windows Server 2022 | Ubuntu 22.04 (`TF_VAR_ncp_server_image_name`) | Ubuntu 22.04 (`TF_VAR_alibaba_image_name_regex`) | Ubuntu 22.04 gen2 (`TF_VAR_azure_image_sku`) | Ubuntu 22.04 (`TF_VAR_gcp_image_family`) |
+| VM login account | `ubuntu` (`Administrator` on Windows) | **`root`** | **`root`** | **`azureuser`** (root is not allowed) | `ubuntu` (through instance metadata) |
+| Servers installed on the VM | optional: MinIO, MySQL, MariaDB, PostgreSQL, MongoDB | — | — | — | — |
+| MySQL / PostgreSQL | RDS | Managed Cloud DB | ApsaraDB RDS | Flexible Server | Cloud SQL (Enterprise edition) |
+| MongoDB | **not prepared** as a managed DB (can run on the VM) | Managed Cloud DB (STAND_ALONE) | ApsaraDB for MongoDB (replica set, account **`root`**) | Azure DocumentDB / Cosmos DB for MongoDB vCore (`mongodb+srv://`, TLS) | **not prepared** (no managed MongoDB) |
+| MariaDB | RDS | **not prepared** | ApsaraDB RDS | **not prepared** (service retired) | **not prepared** |
+| Network | default VPC, nothing to do | **a VPC is required — created and destroyed automatically** | **a VPC is required — created and destroyed automatically** | the vm module builds its own VNet; no network module | the vm module builds its own VPC; no network module |
+| Resource group | — | — | — | one per module (`<prefix>-vm-rg`, `<prefix>-database-rg`), deleted by teardown | — |
+| Reaching a DB from outside | works immediately | **a public domain must be requested once, in the console** | works immediately (public endpoints are created by the module) | works immediately (public access + firewall rule) | works immediately (public IP + authorized network) |
+| DB engine version format | major.minor (`8.0`) | **full version (`8.0.36`)** | major.minor (`8.0`, `14.0`) | MySQL `8.0.21` / `8.4`, PostgreSQL major (`14`), MongoDB `7.0` | MySQL major.minor (`8.4`), PostgreSQL major (`16`) — the module turns them into `MYSQL_8_4` / `POSTGRES_16` |
+| Managed DB preparation time | a few minutes | **about 30 minutes** | RDS: a few minutes to ~20; MongoDB: 5-10 minutes | not measured yet | not measured yet |
 
 ---
 
@@ -131,6 +135,8 @@ go version                  # only needed for Step 5 (test data)
 | Alibaba | `ALIBABA_ACCESS_KEY_ID`, `ALIBABA_ACCESS_KEY_SECRET` | RAM user AccessKey with OSS, ECS, VPC, RDS and MongoDB permissions |
 | Azure | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | A service principal: `az ad sp create-for-rbac --role Contributor --scopes /subscriptions/<id>` |
 | Azure (bucket) | `AZURE_S3_ACCESS_KEY`, `AZURE_S3_SECRET_KEY` | An **existing** storage account's name and one of its keys (portal: Storage account > Security + networking > Access keys) |
+| GCP | `GCP_CLIENT_ID`, `GCP_CLIENT_EMAIL`, `GCP_PRIVATE_KEY_ID`, `GCP_PRIVATE_KEY`, `GCP_PROJECT_ID` | A service account's JSON key (IAM & Admin > Service accounts > Keys > Add key > JSON): the fields of the same name |
+| GCP (bucket) | `GCP_S3_ACCESS_KEY`, `GCP_S3_SECRET_KEY` | An **existing** HMAC key for that service account (Cloud Storage > Settings > Interoperability) |
 
 NCP Object Storage and Alibaba OSS use the same key pair as the rest of their CSP —
 there is no separate S3 credential.
@@ -142,6 +148,26 @@ account in the portal first, and `tofu/azure/bucket` creates only the container 
 service principal also has to register the resource providers each module uses
 (`Microsoft.Storage`, `.Compute`, `.Network`, `.DBforMySQL`, `.DBforPostgreSQL`,
 `.DocumentDB`) — azurerm 5.x no longer does it unasked; Contributor is allowed to.
+
+**GCP needs three things done in the project first**, none of which tofuenv does:
+
+- **Roles** — the service account needs Editor, or Compute Admin, Cloud SQL Admin and
+  Storage Admin. A missing one fails the apply with `notAuthorized` / `PERMISSION_DENIED`.
+- **APIs** — enable the ones the modules use; a disabled one fails the apply with
+  `SERVICE_DISABLED` and a link to enable it:
+
+  ```bash
+  gcloud services enable storage.googleapis.com compute.googleapis.com sqladmin.googleapis.com
+  ```
+
+- **HMAC key** — Cloud Storage's S3-compatible API signs with an HMAC key, not with the
+  service account key: create one for the service account (Cloud Storage > Settings >
+  Interoperability > Create a key for a service account) and note the secret, shown only
+  once. These are `S3AccessKey` / `S3SecretKey` in cb-tumblebug and cb-spider.
+
+The VM is logged into with a key put on it through instance metadata, so it needs OS Login
+off: the vm module turns it off on the instance, which works unless an organization policy
+enforces OS Login.
 
 ---
 
@@ -246,6 +272,42 @@ TF_VAR_azure_db_username=dbadmin
 otherwise blank the keys already stored. Check what the region sells with
 `./scripts/azure-db-versions.sh` once Step 2 is done.
 
+For GCP, add:
+
+```dotenv
+# Credentials - blanked automatically once stored in OpenBao (Step 2)
+GCP_CLIENT_ID=123456789012345678901       # the fields of the service account's JSON key
+GCP_CLIENT_EMAIL=name@project-id.iam.gserviceaccount.com
+GCP_PRIVATE_KEY_ID=0123456789abcdef0123456789abcdef01234567
+GCP_PRIVATE_KEY='-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----\n'
+GCP_PROJECT_ID=project-id
+GCP_S3_ACCESS_KEY=GOOG1E...               # the HMAC key's access ID
+GCP_S3_SECRET_KEY=its_secret
+GCP_DB_PASSWORD=Cent1pede_2024            # shared by MySQL and PostgreSQL
+
+# Settings - kept as is
+TF_VAR_gcp_region=asia-northeast3         # Seoul
+TF_VAR_gcp_zone=asia-northeast3-a         # the VM's zone, in that region
+TF_VAR_gcp_name_prefix=cptf               # short for "centipede tofu"
+TF_VAR_gcp_bucket_name=cptf-gcp-bucket-yourname-20260804   # globally unique
+TF_VAR_gcp_db_name=testdb
+TF_VAR_gcp_db_username=dbadmin
+```
+
+**The seven GCP credential keys are registered together** as well (`secret/csp/gcp`), and
+`up.sh` checks they have the shape of a JSON key's fields. The five service account keys
+can be printed from the downloaded key file, ready to paste:
+
+```bash
+jq -r '"GCP_CLIENT_ID=\(.client_id)\nGCP_CLIENT_EMAIL=\(.client_email)\nGCP_PRIVATE_KEY_ID=\(.private_key_id)\nGCP_PRIVATE_KEY='"'"'\(.private_key|@json|.[1:-1])'"'"'\nGCP_PROJECT_ID=\(.project_id)"' key.json
+```
+
+`GCP_PRIVATE_KEY` stays on one line with literal `\n` in it, **in single quotes**. Double
+quotes give the scripts the same value, but docker compose turns their `\n` into real
+newlines in the runner; without quotes, the spaces in `BEGIN PRIVATE KEY` break the line.
+Check the versions, tiers and machine types with `./scripts/gcp-db-versions.sh` once
+Step 2 is done.
+
 **The name prefix** is short for **centipede tofu** and names every resource this
 environment creates (`cptf-vm`, `cptf-mysql`, `cptf-rds-sg`, `cptf-vpc`, ...), so they
 are easy to tell apart from anything else in the account. Each CSP has its own key, and
@@ -257,11 +319,13 @@ they may hold different values:
 | `TF_VAR_ncp_name_prefix` | 2-10 | The managed MongoDB `service_name` is capped at 15, and `cptf-mongodb` is already 12 |
 | `TF_VAR_alibaba_name_prefix` | 2-20 | Kept the same as AWS; Alibaba's own name limits are far longer |
 | `TF_VAR_azure_name_prefix` | 2-12 | Names the resource groups and the DB servers, which also take a 6-character random suffix (`cptf-postgres-ab12cd`) |
+| `TF_VAR_gcp_name_prefix` | 2-12 | Starts the VM, VPC and Cloud SQL instance names; the instances also take a 6-character random suffix (`cptf-postgres-ab12cd`) |
 
 Lowercase letters, digits and hyphens, starting with a letter; a violation is rejected at
 plan time. **Buckets are not covered by the prefix** — an S3 name has to be globally
 unique, so `TF_VAR_aws_bucket_name`, `TF_VAR_ncp_bucket_name`,
-`TF_VAR_alibaba_bucket_name` and `TF_VAR_azure_bucket_name` are set in full.
+`TF_VAR_alibaba_bucket_name`, `TF_VAR_azure_bucket_name` and `TF_VAR_gcp_bucket_name` are
+set in full.
 
 Keep some room below those limits: NCP login keys append a role and a random suffix on
 top of the prefix (`cptf-vm-a1b2c3`), and the longest generated name is the prefix plus
@@ -281,7 +345,8 @@ and hyphens only, 3-63 characters. NCP bucket names must be unique within the re
 Alibaba OSS names are globally unique across all Alibaba Cloud accounts, like S3.
 An Azure container name only has to be unique within its storage account, but each
 environment still needs its own, as on the other CSPs (lowercase, digits and hyphens,
-no `--`).
+no `--`). A GCS bucket name is global across all of Google Cloud, like S3; it may not
+start with `goog` or contain `google`.
 
 **Use `dbadmin`, not `admin`, as the DB username.** PostgreSQL reserves `admin` and
 `rdsadmin`, so an apply using them fails. `dbadmin` is safe on all engines and is the
@@ -318,6 +383,18 @@ MongoDB share `AZURE_DB_PASSWORD`:
 
 Azure also refuses some admin names — `admin`, `administrator`, `root`, `azure_superuser`,
 `guest`, `public` and `pg_*`; the module rejects them at plan time.
+
+**The GCP DB password rules are enforced as well.** MySQL and PostgreSQL share
+`GCP_DB_PASSWORD`:
+
+- 8 to 64 characters
+- at least three of: uppercase, lowercase, digits, special characters
+- allowed special characters: `! $ ^ & * ( ) _ + - =`
+- example: `Cent1pede_2024`
+
+Cloud SQL keeps some account names for itself — `root`, `postgres`, `mysql`,
+`cloudsql*` and `pg_*`; the module rejects them at plan time. The same password is set
+on MySQL's `root` as well, which Cloud SQL would otherwise leave without one.
 
 **An AWS engine version the region does not offer fails the apply.** RDS is looser than
 NCP about the format — it accepts both a prefix (`8.0`) and a full version (`8.0.42`),
@@ -364,6 +441,16 @@ use in the region, along with the VM sizes. Azure publishes no list of the Mongo
 accepts — anything else is refused at plan time — and the clusters already in the
 subscription. A tier at `M30` or above cannot be scaled back down to the burstable
 `M10` / `M20` / `M25`.
+
+**GCP versions are the number alone** — `TF_VAR_gcp_mysql_version=8.4`,
+`TF_VAR_gcp_postgres_version=16` — and the module turns them into the Cloud SQL names
+(`MYSQL_8_4`, `POSTGRES_16`); the Cloud SQL name itself is rejected at plan time. A
+version past its community end of life is in Cloud SQL extended support, billed on top.
+**Tiers** are `db-custom-<vCPU>-<memory MB>` (`db-custom-1-3840` is 1 vCPU / 3.75 GB) or
+a predefined one such as the shared-core `db-g1-small`; the `db-perf-optimized-*` /
+`db-memory-optimized-*` tiers belong to the Enterprise Plus edition, which the module
+does not use. `./scripts/gcp-db-versions.sh` lists the versions, the tiers, and the zones,
+machine types and image families of the region.
 
 Leave `VAULT_TOKEN` empty — Step 2 fills it in.
 
@@ -413,6 +500,7 @@ re-running `up.sh` is safe.
 | `ncp` | `bucket`, `vm`, `database` |
 | `alibaba` | `bucket`, `vm`, `database` |
 | `azure` | `bucket`, `vm`, `database` |
+| `gcp` | `bucket`, `vm`, `database` |
 
 **Running the same command twice is safe.** A resource that already holds tofu state is
 reported and skipped, so nothing is created and nothing is charged:
@@ -441,6 +529,7 @@ engines named, comma-separated, using the same names as `gen-data.sh --engine`:
 | `ncp` | `mysql`, `postgresql`, `mongodb` |
 | `alibaba` | `mysql`, `mariadb`, `postgresql`, `mongodb` |
 | `azure` | `mysql`, `postgresql`, `mongodb` |
+| `gcp` | `mysql`, `postgresql` |
 
 ```bash
 ./scripts/prepare.sh aws database --engine postgresql          # PostgreSQL only
@@ -666,6 +755,36 @@ module outputs it as `mongodb_uri` and `gen-data.sh` passes it to gendata as is,
 of a host and port. MySQL's `log_bin_trust_function_creators` is ON by default on Azure,
 so the fixture's functions and triggers load with no parameter set.
 
+**GCP** — the same three resources, in any order, once the project is set up as in
+[Step 0](#step-0--prerequisites):
+
+```bash
+./scripts/gcp-db-versions.sh              # optional: Cloud SQL versions and tiers, zones, machine types, images
+./scripts/prepare.sh gcp bucket
+./scripts/prepare.sh gcp vm
+./scripts/prepare.sh gcp database         # Cloud SQL for MySQL + PostgreSQL (or --engine)
+```
+
+**Sizing on GCP** — all set in `.env`:
+
+| What | Variable | `.env.example` value |
+|---|---|---|
+| VM machine type | `TF_VAR_gcp_machine_type` | `e2-medium` (2 vCPU / 4 GB, shared core) — list with `./scripts/gcp-db-versions.sh server` |
+| VM boot disk (GB) | `TF_VAR_gcp_vm_volume_size`, `_disk_type` | `30` (10 or more), `pd-balanced`. The VM's only disk; fixed at creation |
+| VM image | `TF_VAR_gcp_image_project`, `_image_family` | `ubuntu-os-cloud` / `ubuntu-2204-lts`, the latest image of the family |
+| VM subnet | `TF_VAR_gcp_subnet_cidr` | `10.40.0.0/24` |
+| MySQL | `TF_VAR_gcp_mysql_tier`, `_storage_gb` | `db-custom-1-3840` (1 vCPU / 3.75 GB), `20` (10 or more) |
+| PostgreSQL | `TF_VAR_gcp_postgres_tier`, `_storage_gb` | `db-custom-1-3840`, `20` |
+
+There is **no network module on GCP** either. `tofu/gcp/vm` creates the VM's VPC, subnet,
+SSH firewall rule and static external IP, and `tofu/gcp/database` gives each Cloud SQL
+instance a public IP limited by an authorized network (`TF_VAR_allowed_cidr`). The
+instances run the Enterprise edition, zonal, with backups, storage auto-increase and
+deletion protection off, as a test target needs. A deleted instance name cannot be reused
+for about a week, so the names carry a random suffix kept in state. MySQL's
+`log_bin_trust_function_creators` is set on, so the fixture's functions and triggers load.
+The PostgreSQL admin is not a superuser on Cloud SQL; it is a member of `cloudsqlsuperuser`.
+
 Connection info is printed automatically when an apply finishes.
 
 **How long to expect:**
@@ -680,6 +799,7 @@ Connection info is printed automatically when an apply finishes.
 | `ncp database` | **about 30 minutes** — do not interrupt it |
 | `alibaba database` | RDS several minutes to ~20 each, MongoDB 5–10 minutes (they are created in parallel) |
 | `azure database` | not measured yet; Flexible Server can take tens of minutes. The engines are created in parallel |
+| `gcp database` | not measured yet; Cloud SQL usually takes 5–10 minutes per instance. The engines are created in parallel |
 
 The NCP managed database resources have no update path: every attribute forces
 replacement. Changing one variable re-creates the database and costs another 30
@@ -875,7 +995,7 @@ of accumulating copies. A summary of the last run is written per environment, to
 ### `conn-info.sh` — everything at once (recommended)
 
 ```
-./scripts/conn-info.sh [aws|ncp|alibaba|azure] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]
+./scripts/conn-info.sh [aws|ncp|alibaba|azure|gcp] [network|bucket|vm|database|all] [--prefix <name>] [--reveal]
 ```
 
 ```bash
@@ -989,6 +1109,14 @@ On Azure, likewise — there is no network module to clean up:
 ./scripts/teardown.sh azure bucket       # deletes the container only - see below
 ```
 
+And on GCP:
+
+```bash
+./scripts/teardown.sh gcp database       # deletes the Cloud SQL instances
+./scripts/teardown.sh gcp vm             # deletes the VM with its VPC, firewall rule and IP
+./scripts/teardown.sh gcp bucket         # deletes the bucket with its objects - see below
+```
+
 **One database engine at a time** — `--engine` destroys just the engines named; the
 others keep running:
 
@@ -997,11 +1125,13 @@ others keep running:
 ./scripts/teardown.sh ncp database --engine mongodb
 ./scripts/teardown.sh alibaba database --engine mariadb
 ./scripts/teardown.sh azure database --engine mongodb
+./scripts/teardown.sh gcp database --engine mysql
 ```
 
 - It is a targeted destroy of those engines' own resources (the instance, plus its
   parameter group on AWS, its ACG rule on NCP, its account, database and public
-  endpoint on Alibaba, or its database and firewall rule on Azure). The engines that stay are not re-applied, so a `.env` change
+  endpoint on Alibaba, its database and firewall rule on Azure, or its database and user on
+  GCP). The engines that stay are not re-applied, so a `.env` change
   made since cannot re-create them.
 - Removing the **last** engine left destroys the whole database module — subnet group
   and security group included — exactly like a run without `--engine`.
@@ -1036,6 +1166,11 @@ go is needed.
 every blob in it, so nothing has to be emptied first. The storage account
 (`AZURE_S3_ACCESS_KEY`) was there before tofuenv and stays, with any other container in it.
 `azure vm` and `azure database` delete their whole resource group instead.
+
+**`gcp bucket` is not emptied first either.** `tofu/gcp/bucket` sets `force_destroy`, and
+turns the bucket's soft delete off, so deleted objects are not kept — and billed — for the
+7 days a new bucket keeps them by default. The HMAC key was made before tofuenv and stays,
+and so do the project APIs, enabled as they were found.
 
 A destroy that fails is **retried once, 60 seconds later** (`destroy failed — retry 1/1
 in 60s`). NCP answers some delete calls with a 500 while the resource is still being
