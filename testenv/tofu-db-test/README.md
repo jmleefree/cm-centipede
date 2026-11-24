@@ -198,8 +198,14 @@ so a charset regression shows up in the data.
 ## Credentials
 
 You type keys into `.env`; `up.sh` moves them into OpenBao and blanks them in the
-file. The tofu modules then read them through the `vault` provider, so no
-plaintext key stays on disk.
+file. Before every tofu command that configures providers, `_in_runner`
+(`scripts/lib/tofu.sh`) sources `scripts/lib/csp-env.sh`, which reads the CSP keys
+and exports them as the providers' own environment variables
+(`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `NCLOUD_ACCESS_KEY`/`NCLOUD_SECRET_KEY`).
+They never pass through a data source, so they never enter the state. The rdbms
+modules still read the DB master password through the `vault` provider, because
+the instance resource keeps it in the state anyway. That is why the state is
+encrypted (see [State encryption](#state-encryption)).
 
 ```
 .env (600)
@@ -211,8 +217,10 @@ plaintext key stays on disk.
     secret/db/aws    AWS_DB_PASSWORD
     secret/db/ncp    NCP_DB_PASSWORD
       │
-      ├──▶ tofu provider "vault"          preparation
-      └──▶ vault_db_password() in tofu.sh target databases, probe, centipede request
+      ├──▶ lib/csp-env.sh (env vars)      CSP keys for the providers
+      ├──▶ tofu provider "vault"          DB password for the rdbms modules
+      ├──▶ vault_db_password() in tofu.sh target databases, probe, centipede request
+      └──▶ Transit key tofu-state         encrypts every tofu state
 ```
 
 `register-creds.sh` validates the NCP password against the rules the ncloud
@@ -224,12 +232,43 @@ reports the violation as a failed creation about 30 minutes later.
 - **`VAULT_TOKEN` stays in `.env` permanently.** It is the OpenBao root token;
   anything that can read the file can read every stored credential. The file mode
   is the whole protection, which is why 600 is enforced.
-- **`terraform.tfstate` holds the DB master password in plaintext.** This is
-  inherent to Terraform/OpenTofu state. All state files are git-ignored.
+- **`terraform.tfstate` holds the DB master password, but only as ciphertext.**
+  The state is encrypted (see below), so the file alone reveals nothing. Anyone
+  holding `VAULT_TOKEN` can still decrypt it through OpenBao. All state files are
+  git-ignored.
+- **`tofu/my-target` and `tofu/pg-target` take the DB master password as a
+  variable, passed as `TF_VAR_password`** for their apply and destroy only
+  (`target_db_create`, `target_db_drop`, `--cleanup`). It is never written to
+  `matrix.auto.tfvars.json`, which stays on disk after the run. `docker exec`
+  gets only the name (`-e TF_VAR_password`), so the value is not in the process
+  list either.
 - **The target password travels in the centipede request body**, and in
   `MODE=ssh` the SSH private key travels in the honeybee request body — honeybee
   stores the PEM itself, not a path. Both are masked in `logs/*-api.log`, but
   they are on the wire; use this against test credentials only.
+
+## State encryption
+
+Every state and plan file is encrypted (AES-GCM), and its data key is wrapped by
+the OpenBao Transit key `tofu-state`. The file holds only ciphertext, and
+reading it needs OpenBao unsealed.
+
+| Where | What |
+|---|---|
+| `docker-compose.yaml` | `TF_ENCRYPTION` and `BAO_TOKEN` (root token) on the runner |
+| `init/openbao/openbao-transit.sh` | creates the Transit key; `up.sh` runs it every time |
+| `up.sh` | lists any state file still in plaintext |
+| `down.sh --volumes` | refuses while a state still tracks a resource or cannot be read; otherwise removes the states with the storage (`FORCE_WIPE=1` overrides) |
+| `openbao-init.sh` | refuses to initialize a new OpenBao while an encrypted state exists (`FORCE_REINIT=1` overrides) |
+
+- **A plaintext state is refused** (`enforced = true`). A matrix state is rebuilt
+  every run, so one that tracks no resource (`tofu state list` shows only
+  `data.*`) can be deleted.
+- **Losing the key loses every state.** The key lives only in
+  `container-volume/openbao-data/` and needs
+  `init/openbao/secrets/openbao-init.json` to open, so back up the two together.
+- **Read state only through tofu.** Use `tofu state list` or `tofu output` inside
+  the runner; the JSON on disk is ciphertext.
 
 ---
 

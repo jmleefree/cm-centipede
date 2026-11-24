@@ -7,9 +7,10 @@ init/openbao/secrets/
 container-volume/
 
 # tofu state and working files.
-#   State holds the managed-DB master password in plaintext - that is inherent to
-#   Terraform/OpenTofu state, not a choice this folder made. Treat the directory
-#   as sensitive.
+#   State holds the managed-DB master password. The runner encrypts it with the
+#   OpenBao Transit key (TF_ENCRYPTION in docker-compose.yaml). The tfvars files
+#   hold no password (my-target / pg-target get it as TF_VAR_password), but they
+#   name the hosts. Treat the directory as sensitive.
 **/.terraform/
 **/.terraform.lock.hcl
 **/terraform.tfstate

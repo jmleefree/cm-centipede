@@ -53,6 +53,35 @@ if [ "$INIT_STATUS" = "true" ]; then
     exit 1
 fi
 
+# Refuse to start a new OpenBao while encrypted tofu state exists. Those states
+# are encrypted under the Transit key `tofu-state` of the OpenBao whose data is
+# gone; a fresh instance gets a new key and cannot read them, so tofu would no
+# longer know the resources they track - they would have to be deleted at the
+# CSP by hand. An encrypted file does not say whether it tracks anything, so an
+# emptied one is refused too; ./scripts/down.sh --volumes checks and removes
+# them before it wipes. FORCE_REINIT=1 initializes anyway. The versions modules
+# create nothing and only cache a catalog lookup, so their states are just
+# removed: the next lookup rebuilds them under the new key.
+TOFU_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)/tofu"
+ENCRYPTED_STATES="$(find "$TOFU_DIR" -name terraform.tfstate -type f -not -path '*/versions/*' -not -path '*/.terraform/*' 2>/dev/null | while read -r f; do
+    jq -e 'has("encrypted_data")' "$f" >/dev/null 2>&1 && echo "  ${f#"$TOFU_DIR"/}"
+done || true)"
+if [ -n "$ENCRYPTED_STATES" ] && [ "${FORCE_REINIT:-}" != "1" ]; then
+    echo -e "${RED}[openbao-init] Refusing to initialize a new OpenBao:${NC} these tofu states are" >&2
+    echo -e "  encrypted with the Transit key of the previous one, which a new instance cannot read:" >&2
+    echo "$ENCRYPTED_STATES" >&2
+    echo "" >&2
+    echo "  Restore the previous OpenBao instead - container-volume/openbao-data/ together with" >&2
+    echo "  ${INIT_OUTPUT} - and run ./scripts/up.sh again." >&2
+    echo "  If nothing those states tracked is left at the CSP, delete the state files," >&2
+    echo "  or run with FORCE_REINIT=1 to initialize anyway (the states stay unreadable)." >&2
+    exit 1
+fi
+for f in "$TOFU_DIR"/*/versions/terraform.tfstate "$TOFU_DIR"/*/versions/terraform.tfstate.backup; do
+    [ -f "$f" ] && jq -e 'has("encrypted_data")' "$f" >/dev/null 2>&1 && rm -f "$f" \
+        && echo -e "${YELLOW}[openbao-init]${NC} Removed ${f#"$TOFU_DIR"/} (encrypted with the previous key; a catalog cache only)."
+done
+
 # Initialize (1 key share, threshold 1 — local development convenience; raise it in production)
 echo -e "${YELLOW}[openbao-init]${NC} Initializing OpenBao (1 key share, threshold 1)..."
 INIT_RESPONSE=$(curl -sf -X POST "${VAULT_ADDR}/v1/sys/init" \

@@ -13,6 +13,8 @@ variable "username" {
   type        = string
 }
 
+# Set as TF_VAR_password by lib/tofu.sh (target_db_create), never written to
+# matrix.auto.tfvars.json: that file stays on disk after the cell.
 variable "password" {
   type      = string
   sensitive = true

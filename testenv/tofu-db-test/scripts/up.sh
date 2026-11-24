@@ -3,9 +3,12 @@
 # up.sh — start the matrix stack (OpenBao + the tofu runner)
 #
 #   1) Start OpenBao
-#   2) Initialize it on the first run, unseal it on later ones
+#   2) Initialize it on the first run, unseal it on later ones, then make sure
+#      the Transit key that encrypts the tofu state exists
+#      (init/openbao/openbao-transit.sh)
 #   3) Register credentials (.env -> OpenBao, then blank those keys in .env)
-#   4) Start the tofu runner (recreated, so it picks up the new VAULT_TOKEN)
+#   4) Start the tofu runner (recreated, so it picks up the new VAULT_TOKEN),
+#      and warn about any tofu state that is still plaintext
 #
 # This stack belongs to this folder. Its compose project, container names,
 # network and published port all differ from tofuenv's, so both can be up at
@@ -64,6 +67,7 @@ if [ -f "$ROOT_DIR/init/openbao/secrets/openbao-init.json" ]; then
 else
 	bash "$ROOT_DIR/init/openbao/openbao-init.sh"
 fi
+bash "$ROOT_DIR/init/openbao/openbao-transit.sh"
 
 if $DO_REGISTER; then
 	echo -e "${CYAN}[3/4] registering credentials...${NC}"
@@ -76,6 +80,21 @@ echo -e "${CYAN}[4/4] starting the tofu runner...${NC}"
 # Recreated on purpose - it has to come up holding the VAULT_TOKEN just written
 # into .env.
 docker compose up -d --force-recreate tofu-runner
+
+# The runner refuses a plaintext state (TF_ENCRYPTION is enforced), so one
+# written before encryption was turned on stops every tofu command on its
+# module. Only the file format is checked here; the content is never read.
+PLAINTEXT_STATES="$(find "$ROOT_DIR/tofu" -type f \( -name terraform.tfstate -o -name terraform.tfstate.backup \) \
+	-not -path '*/.terraform/*' 2>/dev/null | while read -r f; do
+	jq -e 'has("encrypted_data")' "$f" >/dev/null 2>&1 || echo "    ${f#"$ROOT_DIR"/}"
+done)"
+if [ -n "$PLAINTEXT_STATES" ]; then
+	echo -e "${YELLOW}These tofu state files are not encrypted, and tofu refuses to read them:${NC}"
+	echo "$PLAINTEXT_STATES"
+	echo "  Matrix states are rebuilt every run, so one that tracks no resource can simply be"
+	echo "  deleted. One that still does: reclaim it first (--cleanup on the version that wrote"
+	echo "  it), so its resources are not left at the CSP, then delete it."
+fi
 
 echo -e "${GREEN}=== Ready ===${NC}"
 echo "  Run the matrix   :  ./scripts/aws-db-matrix.sh   or   ./scripts/ncp-db-matrix.sh"

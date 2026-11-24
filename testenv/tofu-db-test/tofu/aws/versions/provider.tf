@@ -1,20 +1,14 @@
 terraform {
   required_version = ">= 1.6"
   required_providers {
-    aws   = { source = "hashicorp/aws", version = "~> 5.0" }
-    vault = { source = "hashicorp/vault", version = "~> 4.0" }
+    aws = { source = "hashicorp/aws", version = "~> 5.0" }
   }
 }
 
-provider "vault" {}
-
-data "vault_kv_secret_v2" "aws" {
-  mount = "secret"
-  name  = "csp/aws"
-}
-
+# The CSP keys are not read here. lib/csp-env.sh exports them as
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY before each plan/apply/destroy, which
+# the provider reads itself. A vault_kv_secret_v2 data source would keep them in
+# the state.
 provider "aws" {
-  region     = var.aws_region
-  access_key = data.vault_kv_secret_v2.aws.data["AWS_ACCESS_KEY_ID"]
-  secret_key = data.vault_kv_secret_v2.aws.data["AWS_SECRET_ACCESS_KEY"]
+  region = var.aws_region
 }

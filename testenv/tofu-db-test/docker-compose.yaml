@@ -82,6 +82,31 @@ services:
       # From inside the container, reach OpenBao by its compose service name.
       - VAULT_ADDR=http://openbao:8200
       - VAULT_TOKEN=${VAULT_TOKEN:-}
+      # State encryption. Every state and plan file is encrypted with AES-GCM
+      # under a data key that the OpenBao Transit key `tofu-state` wraps
+      # (created by init/openbao/openbao-transit.sh), so a state file holds only
+      # ciphertext and can be read only while OpenBao is unsealed. `enforced`
+      # refuses a plaintext state. No unencrypted method is declared: tofu
+      # warns on every command while one is.
+      - BAO_TOKEN=${VAULT_TOKEN:-}
+      - |-
+        TF_ENCRYPTION=
+        key_provider "openbao" "bao" {
+          address  = "http://openbao:8200"
+          key_name = "tofu-state"
+        }
+        method "aes_gcm" "main" {
+          keys = key_provider.openbao.bao
+        }
+
+        state {
+          method   = method.aes_gcm.main
+          enforced = true
+        }
+        plan {
+          method   = method.aes_gcm.main
+          enforced = true
+        }
     env_file:
       - .env
     depends_on:

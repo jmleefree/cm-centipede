@@ -15,10 +15,13 @@
 #   interrupted run still says what exists, and --cleanup reclaims all of it.
 #
 # Credentials
-#   The CSP keys and the DB password live in OpenBao, and the modules read them
-#   directly through the vault provider. The only one the matrix holds is the DB
-#   password (a cell has to connect to the target), and even that is fetched on
-#   demand by vault_db_password.
+#   The CSP keys and the DB password live in OpenBao. The CSP keys reach the
+#   providers as environment variables (lib/csp-env.sh, from _in_runner), so they
+#   never enter the state; the rdbms modules read the DB password through the
+#   vault provider. The state is encrypted either way (TF_ENCRYPTION in
+#   docker-compose.yaml), since the instance keeps the password in it.
+#   The only one the matrix holds is the DB password (a cell has to connect to
+#   the target), and even that is fetched on demand by vault_db_password.
 
 if [ -n "${MATRIX_TOFU_SH:-}" ]; then return 0; fi
 MATRIX_TOFU_SH=1
@@ -45,15 +48,31 @@ TOFU_LAST=""
 #   .env is re-read inside the container. The container holds the VAULT_TOKEN it
 #   started with, and up.sh may have written a new one since.
 #   VAULT_ADDR is overwritten with the compose network address - the value in the
-#   env file is the one for the host.
+#   env file is the one for the host. BAO_TOKEN, which the state encryption
+#   (TF_ENCRYPTION) uses to reach the Transit key, follows the same token.
+#
+#   A command that configures providers gets the CSP keys as environment
+#   variables first (lib/csp-env.sh). The others only read the state and skip
+#   the OpenBao lookup.
+#
+#   TF_VAR_password is passed through by name when the caller has set it (see
+#   target_db_create). Only the name is on the docker command line; docker takes
+#   the value from its own environment, so the password is in no file and no
+#   process argument list. When it is unset, nothing is passed.
 _in_runner() {
-	local mod="$1" script="$2"
-	docker exec "$TOFU_RUNNER" bash -c '
+	local mod="$1" script="$2" creds=":"
+	case "$script" in
+	"tofu plan"*|"tofu apply"*|"tofu destroy"*|"tofu refresh"*|"tofu import"*)
+		creds=". /work/scripts/lib/csp-env.sh" ;;
+	esac
+	docker exec -e TF_VAR_password "$TOFU_RUNNER" bash -c '
 		set -euo pipefail
 		set -a; . /work/.env; set +a
 		export VAULT_ADDR=http://openbao:8200
+		export BAO_TOKEN="${VAULT_TOKEN:-${BAO_TOKEN:-}}"
 		mkdir -p /work/.tofu-plugin-cache
 		cd "/work/tofu/'"$mod"'"
+		'"$creds"'
 		'"$script"'
 	' 2>&1
 }
@@ -114,6 +133,8 @@ tofu_init() {
 #   Not passed with -var, because a value crossing docker exec -> bash -c -> tofu
 #   gives quoting three chances to break, and leaves no record of what was
 #   applied. As a file, destroy reuses the very same values.
+#   A password is never put in it: the target database modules get theirs as
+#   TF_VAR_password (target_db_create).
 tofu_vars() {
 	local mod="$1" json="$2"
 	printf '%s\n' "$json" | jq . > "$TOFU_ROOT/tofu/$mod/matrix.auto.tfvars.json"
@@ -754,7 +775,9 @@ cleanup_all_workspaces() {
 		tofu_init "$cell_mod" >/dev/null 2>&1 || true
 		if tofu_has_state "$cell_mod"; then
 			sub "reclaiming leftover $cell_mod"
-			tofu_run "$cell_mod" destroy -auto-approve -input=false \
+			# my-target / pg-target take the password as TF_VAR_password.
+			TF_VAR_password="$(vault_db_password "$csp")" \
+				tofu_run "$cell_mod" destroy -auto-approve -input=false \
 				|| tofu_report_warn "could not reclaim $cell_mod"
 		fi
 	done
@@ -965,7 +988,11 @@ target_db_module() {
 	esac
 }
 
-# _target_db_vars ENGINE PASS "DB1 DB2 ..." — the tfvars JSON for the module.
+# _target_db_vars CSP ENGINE "DB1 DB2 ..." — the tfvars JSON for the module.
+#
+#   The password is not in it. The file stays on disk after the cell, so the
+#   password goes to my-target / pg-target as TF_VAR_password instead (see
+#   target_db_create).
 #
 #   No TLS setting is passed. TARGET_TLS_MODE is a condition of the migration,
 #   carried in the connection centipede makes; these modules only create the
@@ -974,7 +1001,7 @@ target_db_module() {
 #   to the setup made NCP Cloud DB for MySQL, which offers no TLS at all, SKIP
 #   every column instead of reporting how its migrations went.
 _target_db_vars() {
-	local csp="$1" engine="$2" pass="$3" dbs="$4" json
+	local csp="$1" engine="$2" dbs="$3" json
 	json="$(printf '%s\n' $dbs | jq -R . | jq -sc .)"
 
 	# NCP: the CSP API, addressed by the service instance number. No host, port or
@@ -992,19 +1019,19 @@ _target_db_vars() {
 	if [ "$(lower "$engine")" = "postgresql" ]; then
 		jq -n \
 			--arg host "$RDBMS_HOST" --argjson port "${RDBMS_PORT:-5432}" \
-			--arg user "$RDBMS_USER" --arg pass "$pass" \
+			--arg user "$RDBMS_USER" \
 			--arg admin "$RDBMS_ADMIN_DB" --argjson dbs "$json" \
 			--arg template "${PG_TARGET_TEMPLATE:-template1}" \
 			--argjson grant "$PG_GRANT_EFFECTIVE" \
-			'{host:$host, port:$port, username:$user, password:$pass,
+			'{host:$host, port:$port, username:$user,
 			  admin_database:$admin, databases:$dbs,
 			  template:$template, grant_public:$grant}'
 	else
 		jq -n \
 			--arg host "$RDBMS_HOST" --argjson port "${RDBMS_PORT:-3306}" \
-			--arg user "$RDBMS_USER" --arg pass "$pass" \
+			--arg user "$RDBMS_USER" \
 			--argjson dbs "$json" \
-			'{host:$host, port:$port, username:$user, password:$pass,
+			'{host:$host, port:$port, username:$user,
 			  databases:$dbs}'
 	fi
 }
@@ -1024,15 +1051,19 @@ target_db_create() {
 		return 0
 	fi
 
+	# The password reaches my-target / pg-target as TF_VAR_password, set for
+	# these calls only. The assignment in front of a function call is exported
+	# to what the function runs (docker exec -e TF_VAR_password in _in_runner)
+	# and gone when it returns. ncp-target declares no password and ignores it.
 	pass="$(vault_db_password "$csp")"
 	tofu_init "$mod" || return 1
-	tofu_vars "$mod" "$(_target_db_vars "$csp" "$engine" "$pass" "$dbs")"
+	tofu_vars "$mod" "$(_target_db_vars "$csp" "$engine" "$dbs")"
 
 	# Leftovers from a previous cell go first. data-mig requires the target to
 	# exist and be empty, so anything left behind fails as target-not-empty.
-	tofu_quiet "$mod" destroy -auto-approve -input=false || true
+	TF_VAR_password="$pass" tofu_quiet "$mod" destroy -auto-approve -input=false || true
 
-	if ! tofu_quiet "$mod" apply -auto-approve -input=false; then
+	if ! TF_VAR_password="$pass" tofu_quiet "$mod" apply -auto-approve -input=false; then
 		tofu_report "could not create the target database: $dbs"
 		explain_insecure_transport "$TOFU_OUT" "$csp"
 		return 1
@@ -1063,7 +1094,9 @@ target_db_drop() {
 		return 0
 	fi
 
-	tofu_quiet "$mod" destroy -auto-approve -input=false || {
+	# destroy needs the password as much as apply does (see target_db_create).
+	TF_VAR_password="$(vault_db_password "$csp")" \
+		tofu_quiet "$mod" destroy -auto-approve -input=false || {
 		tofu_report_warn "could not drop the target database: $dbs"
 		return 1
 	}
