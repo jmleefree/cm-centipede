@@ -19,7 +19,7 @@ output "s3_endpoint" {
 
 output "project_id" {
   description = "Project the bucket is in (GCP_PROJECT_ID)"
-  value       = local.project_id
+  value       = var.gcp_project_id
 }
 
 output "name_prefix" {

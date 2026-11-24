@@ -18,3 +18,13 @@ variable "azure_name_prefix" {
     error_message = "Prefix must be 2-12 characters of lowercase letters, digits and hyphens, starting with a lowercase letter."
   }
 }
+
+variable "azure_storage_account_name" {
+  description = "Name of the existing storage account the container goes in (AZURE_S3_ACCESS_KEY). Not set in .env: scripts/lib/csp-env.sh exports it as TF_VAR_azure_storage_account_name from OpenBao (secret/csp/azure)"
+  type        = string
+
+  validation {
+    condition     = var.azure_storage_account_name != ""
+    error_message = "azure_storage_account_name is empty: AZURE_S3_ACCESS_KEY is not registered in OpenBao (secret/csp/azure). Set it in .env and run ./scripts/up.sh."
+  }
+}

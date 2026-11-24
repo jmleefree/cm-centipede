@@ -222,6 +222,7 @@ apply_module() {
         cd "/work/'"$mod"'"
         '"$WS_INIT"'
         tofu validate
+        . /work/scripts/lib/csp-env.sh
         tofu apply -auto-approve
         if [ "'"$show"'" = "yes" ]; then
             echo
@@ -232,8 +233,9 @@ apply_module() {
 }
 
 # bucket_owners — "<prefix> <bucket_name>" for every OTHER prefix whose bucket module
-#   holds a bucket. Read straight from the state files: tofu can only read one
-#   workspace at a time, and this runs before any apply.
+#   holds a bucket. The workspaces are found by their state files and asked one at a
+#   time (the files are encrypted, so only tofu can read them); this runs before any
+#   apply.
 bucket_owners() {
     docker exec "$RUNNER" bash -c '
         cd "/work/tofu/'"$CSP"'/bucket" 2>/dev/null || exit 0
@@ -241,7 +243,7 @@ bucket_owners() {
             [ -f "$f" ] || continue
             ws="${f#terraform.tfstate.d/}"; ws="${ws%/terraform.tfstate}"
             [ "$ws" = "'"$WS_PREFIX"'" ] && continue
-            name="$(jq -r ".outputs.bucket_name.value // empty" "$f" 2>/dev/null || true)"
+            name="$(TF_WORKSPACE="$ws" tofu output -raw bucket_name 2>/dev/null || true)"
             [ -n "$name" ] && printf "%s %s\n" "$ws" "$name"
         done
     ' || true

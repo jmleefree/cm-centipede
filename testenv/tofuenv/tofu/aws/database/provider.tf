@@ -6,13 +6,8 @@ terraform {
   }
 }
 
+# The vault provider reads the VAULT_ADDR / VAULT_TOKEN environment variables automatically.
 provider "vault" {}
-
-# AWS credentials (secret/csp/aws)
-data "vault_kv_secret_v2" "aws" {
-  mount = "secret"
-  name  = "csp/aws"
-}
 
 # DB master password (secret/db/aws)
 data "vault_kv_secret_v2" "db" {
@@ -20,8 +15,9 @@ data "vault_kv_secret_v2" "db" {
   name  = "db/aws"
 }
 
+# The credentials come from OpenBao (secret/csp/aws) as AWS_ACCESS_KEY_ID /
+# AWS_SECRET_ACCESS_KEY, exported by scripts/lib/csp-env.sh: a data source would keep
+# them in the state.
 provider "aws" {
-  region     = var.aws_region
-  access_key = data.vault_kv_secret_v2.aws.data["AWS_ACCESS_KEY_ID"]
-  secret_key = data.vault_kv_secret_v2.aws.data["AWS_SECRET_ACCESS_KEY"]
+  region = var.aws_region
 }

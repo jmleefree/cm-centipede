@@ -298,6 +298,7 @@ destroy_module() {
         mkdir -p /work/.tofu-plugin-cache /work/ssh_keys
         cd "/work/'"$mod"'"
         '"$WS_INIT"'
+        . /work/scripts/lib/csp-env.sh
         tofu destroy -auto-approve '"$DESTROY_TARGETS"'
     '
 }
@@ -316,6 +317,7 @@ refresh_outputs() {
         set -a; . /work/.env; set +a
         export VAULT_ADDR=http://openbao:8200
         cd "/work/'"$mod"'"
+        . /work/scripts/lib/csp-env.sh
         tofu apply -refresh-only -auto-approve
     '
 }
@@ -451,7 +453,7 @@ if has_managed_state "$MODULE"; then
         else
             echo -e "${YELLOW}Warning: the outputs could not be refreshed and may still list $(db_cli_names "$REMOVE").${NC}" >&2
             echo "  Refresh them by hand (changes nothing):" >&2
-            echo "    docker exec -e TF_WORKSPACE=${WS_PREFIX} ${RUNNER} bash -c 'set -a; . /work/.env; set +a; export VAULT_ADDR=http://openbao:8200; cd /work/${MODULE} && tofu apply -refresh-only -auto-approve'" >&2
+            echo "    docker exec -e TF_WORKSPACE=${WS_PREFIX} ${RUNNER} bash -c 'set -a; . /work/.env; set +a; export VAULT_ADDR=http://openbao:8200; cd /work/${MODULE} && . /work/scripts/lib/csp-env.sh && tofu apply -refresh-only -auto-approve'" >&2
         fi
     fi
 else

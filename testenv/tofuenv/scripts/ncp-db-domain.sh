@@ -52,6 +52,7 @@ ws_exec bash -c '
     mkdir -p /work/.tofu-plugin-cache /work/ssh_keys
     cd "/work/'"$MODULE"'"
     '"$WS_INIT"' >/dev/null
+    . /work/scripts/lib/csp-env.sh
     tofu apply -refresh-only -auto-approve
 '
 

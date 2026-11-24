@@ -3,9 +3,11 @@
 # up.sh — bring up the whole stack
 # ------------------------------------------------------------------------------
 #   1) Start OpenBao
-#   2) init (first run) or unseal (restart)
+#   2) init (first run) or unseal (restart), then the Transit key that encrypts
+#      the tofu state (init/openbao/openbao-transit.sh)
 #   3) Register credentials (.env -> OpenBao, then blank the .env keys)
-#   4) Start tofu-runner (picking up the refreshed VAULT_TOKEN)
+#   4) Start tofu-runner (picking up the refreshed VAULT_TOKEN), and point to
+#      ./scripts/encrypt-state.sh when a state file is still plaintext
 #
 #   Usage:
 #     ./scripts/up.sh                 # start everything + register credentials
@@ -52,6 +54,7 @@ if [ -f "$ROOT_DIR/init/openbao/secrets/openbao-init.json" ]; then
 else
     bash "$ROOT_DIR/init/openbao/openbao-init.sh"
 fi
+bash "$ROOT_DIR/init/openbao/openbao-transit.sh"
 
 if $DO_REGISTER; then
     echo -e "${CYAN}[3/4] Registering credentials...${NC}"
@@ -63,6 +66,14 @@ fi
 echo -e "${CYAN}[4/4] Starting tofu-runner...${NC}"
 # Recreate the container so it picks up the latest VAULT_TOKEN from .env
 docker compose up -d --force-recreate tofu-runner
+
+# The runner refuses a plaintext state, and a state that still tracks the old
+# CSP credential data source cannot be planned, so either would stop its module
+# at the next prepare or teardown.
+if ! bash "$SCRIPT_DIR/encrypt-state.sh" --check >/dev/null 2>&1; then
+    echo -e "${YELLOW}Some tofu state files are still plaintext or hold the old CSP credential${NC}"
+    echo -e "${YELLOW}data source, and tofu cannot work with them. Fix them once:  ./scripts/encrypt-state.sh${NC}"
+fi
 
 echo -e "${GREEN}=== Ready ===${NC}"
 echo "  Prepare    :  ./scripts/prepare.sh <csp> <resource>     # csp: aws|ncp|alibaba|azure|gcp, resource: bucket|vm|database"

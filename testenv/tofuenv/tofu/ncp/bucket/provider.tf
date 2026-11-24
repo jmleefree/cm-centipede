@@ -2,22 +2,16 @@ terraform {
   required_version = ">= 1.6"
   required_providers {
     ncloud = { source = "NaverCloudPlatform/ncloud", version = "~> 4.0" }
-    vault  = { source = "hashicorp/vault", version = "~> 4.0" }
   }
 }
 
-provider "vault" {}
-
-data "vault_kv_secret_v2" "ncp" {
-  mount = "secret"
-  name  = "csp/ncp"
-}
+# The credentials come from OpenBao (secret/csp/ncp) as NCLOUD_ACCESS_KEY /
+# NCLOUD_SECRET_KEY, exported by scripts/lib/csp-env.sh: a data source would keep them
+# in the state.
 
 # Object Storage is platform independent and needs no VPC, but the provider still
 # requires support_vpc = true.
 provider "ncloud" {
-  access_key  = data.vault_kv_secret_v2.ncp.data["NCP_ACCESS_KEY"]
-  secret_key  = data.vault_kv_secret_v2.ncp.data["NCP_SECRET_KEY"]
   region      = var.ncp_region
   site        = "public"
   support_vpc = true

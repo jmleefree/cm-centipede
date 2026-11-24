@@ -59,6 +59,7 @@ JSON="$(docker exec "$RUNNER" bash -c '
     mkdir -p /work/.tofu-plugin-cache
     cd "/work/'"$MODULE"'"
     flock /work/.tofu-plugin-cache/.init.lock tofu init -input=false >/dev/null
+    . /work/scripts/lib/csp-env.sh
     tofu apply -auto-approve >/dev/null
     tofu output -json
 ')"

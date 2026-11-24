@@ -86,16 +86,25 @@ ws_current() {
 }
 
 # ws_prepared — "<csp> <module> <prefix>" for every state that tracks a managed
-#   resource, across every prefix. The state files are read directly: tofu can only
-#   look at one workspace at a time, and asking it about a workspace that does not
-#   exist would create one. Data sources, leftover outputs and managed blocks
-#   without instances do not count.
+#   resource, across every prefix. The workspaces are found by their state files and
+#   asked one at a time: asking tofu about a workspace that does not exist would
+#   create one, and the files themselves are encrypted, so only tofu can read them.
+#   Data sources, leftover outputs and managed blocks without instances do not count.
 ws_prepared() {
     docker exec "$RUNNER" bash -c '
-        # A managed block with no instances does not count: tofu leaves one behind
-        # for a count resource whose create never started (a failed apply), and
-        # nothing exists at the CSP for it.
-        managed() { jq -e "[.resources[]? | select(.mode == \"managed\" and ((.instances // []) | length) > 0)] | length > 0" "$1" >/dev/null 2>&1; }
+        # tofu state list prints resource instances only, so a managed block with no
+        # instances is left out by itself: tofu leaves one behind for a count resource
+        # whose create never started (a failed apply), and nothing exists at the CSP
+        # for it. A state it cannot read (still plaintext, or OpenBao sealed) is
+        # reported rather than taken for "not prepared".
+        managed() {
+            local out
+            if ! out="$(cd "$1" && TF_WORKSPACE="$2" tofu state list 2>/dev/null)"; then
+                echo "cannot read the state of ${1#/work/} (${2}): run ./scripts/encrypt-state.sh --check" >&2
+                return 1
+            fi
+            printf "%s\n" "$out" | grep -qvE "(^|\.)data\.|^$"
+        }
         for dir in /work/tofu/aws/bucket /work/tofu/aws/vm /work/tofu/aws/database \
                    /work/tofu/ncp/bucket /work/tofu/ncp/vm /work/tofu/ncp/database /work/tofu/ncp/network \
                    /work/tofu/alibaba/bucket /work/tofu/alibaba/vm /work/tofu/alibaba/database \
@@ -107,7 +116,7 @@ ws_prepared() {
             for f in "$dir"/terraform.tfstate.d/*/terraform.tfstate; do
                 [ -f "$f" ] || continue
                 ws="${f%/terraform.tfstate}"; ws="${ws##*/}"
-                managed "$f" && printf "%s %s %s\n" "$csp" "$mod" "$ws"
+                managed "$dir" "$ws" && printf "%s %s %s\n" "$csp" "$mod" "$ws"
             done
         done
     '

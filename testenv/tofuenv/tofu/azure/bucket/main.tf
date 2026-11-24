@@ -9,12 +9,12 @@
 #   gendata fills the container through the azblob SDK; this module owns the
 #   container lifecycle.
 # ---------------------------------------------------------------------------
-# Every value read from OpenBao is marked sensitive. The account name is not a
-# secret - it is the host name of the Blob endpoint, <name>.blob.core.windows.net -
-# so it is unmarked here, which lets the outputs and the precondition message
-# show it. The account key (AZURE_S3_SECRET_KEY) is not read by this module at all.
+# The account name is not a secret - it is the host name of the Blob endpoint,
+# <name>.blob.core.windows.net - so scripts/lib/csp-env.sh hands it over from
+# OpenBao as a plain variable, which the outputs and the precondition message
+# show. The account key (AZURE_S3_SECRET_KEY) is not read by this module at all.
 locals {
-  storage_account_name = nonsensitive(data.vault_kv_secret_v2.azure.data["AZURE_S3_ACCESS_KEY"])
+  storage_account_name = var.azure_storage_account_name
 }
 
 # The account is found by name alone: its resource group is not asked for in

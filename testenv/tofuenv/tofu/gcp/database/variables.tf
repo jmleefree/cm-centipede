@@ -122,3 +122,13 @@ variable "gcp_postgres_version" {
     error_message = "gcp_postgres_version must be the major version number alone, e.g. 16 - not POSTGRES_16."
   }
 }
+
+variable "gcp_project_id" {
+  description = "Project the provider works in (GCP_PROJECT_ID). Not set in .env: scripts/lib/csp-env.sh exports it as TF_VAR_gcp_project_id from OpenBao (secret/csp/gcp)"
+  type        = string
+
+  validation {
+    condition     = var.gcp_project_id != ""
+    error_message = "gcp_project_id is empty: GCP_PROJECT_ID is not registered in OpenBao (secret/csp/gcp). Set it in .env and run ./scripts/up.sh."
+  }
+}

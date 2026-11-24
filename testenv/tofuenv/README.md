@@ -89,9 +89,11 @@ HMAC key is made for the bucket — see [Step 0](#step-0--prerequisites).
  Step 8  Shut down         ./scripts/down.sh
 ```
 
-Credentials never reach a tofu module as an environment variable: `up.sh` writes them
-into OpenBao, blanks them in `.env`, and each module reads them at apply time through
-the `vault` provider.
+Credentials never stay in `.env` or in the tofu state: `up.sh` writes them into
+OpenBao and blanks them in `.env`. At apply time `scripts/lib/csp-env.sh` hands the CSP
+keys to the provider as its own environment variables, and the DB/VM passwords are
+read through the `vault` provider. Every state file is encrypted with an OpenBao
+Transit key — see [State encryption](#state-encryption).
 
 ---
 
@@ -465,10 +467,13 @@ Leave `VAULT_TOKEN` empty — Step 2 fills it in.
 This does four things:
 
 1. Starts the **OpenBao** container (the credential vault).
-2. **Initialises** it on first run, **unseals** it on later runs.
+2. **Initialises** it on first run, **unseals** it on later runs, and creates the
+   **Transit key `tofu-state`** the tofu state is encrypted with, if it is missing.
 3. **Stores** the `.env` credentials in OpenBao, then **blanks those keys in `.env`**
    so no plaintext key stays on disk.
 4. Starts the **tofu-runner** container, which every script drives via `docker exec`.
+   If a state file written before [state encryption](#state-encryption) is found, it
+   says so: run `./scripts/encrypt-state.sh` once.
 
 On success:
 
@@ -1050,7 +1055,10 @@ docker exec -e TF_WORKSPACE=cptf tofuenv-runner bash -c \
 ```
 
 `TF_WORKSPACE` is the prefix — every module keeps one state per prefix, and without it
-tofu reads the empty `default` workspace. Replace `aws` with `ncp`, and `database` with
+tofu reads the empty `default` workspace. Run tofu **inside tofu-runner** as above: the
+state is encrypted, and only the runner has the encryption config. For `plan`, `apply`
+or `destroy` by hand, also source the CSP keys first —
+`set -a; . /work/.env; set +a; . /work/scripts/lib/csp-env.sh` after the `cd`. Replace `aws` with `ncp`, and `database` with
 `bucket`, `vm` or `network`. Drop `-raw`
 for non-sensitive outputs. Output names are the **same on every CSP**, so anything
 reading them stays CSP-agnostic:
@@ -1298,12 +1306,53 @@ So changing a prefix does not rename, replace or break anything:
 
 ---
 
+## State encryption
+
+A tofu state holds everything its resources and data sources hold — DB passwords,
+generated SSH private keys — so every state and plan file is encrypted.
+
+- **How**: tofu-runner sets `TF_ENCRYPTION` (in `docker-compose.yaml`). Each write
+  encrypts the state with AES-GCM under a fresh data key that OpenBao's Transit key
+  `tofu-state` wraps; the file holds only the wrapped key and ciphertext. `enforced`
+  makes tofu refuse a plaintext state.
+- **The CSP keys are not in the state at all**: `scripts/lib/csp-env.sh` passes them to
+  the provider as environment variables (`AWS_*`, `NCLOUD_*`, `ALIBABA_CLOUD_*`,
+  `ARM_*`, `GOOGLE_CREDENTIALS`) instead of a `vault_kv_secret_v2` data source.
+- **The key** lives in OpenBao's storage (`container-volume/openbao-data/`), is not
+  exportable and cannot be deleted. `init/openbao/openbao-transit.sh` (run by
+  `up.sh`) creates it.
+
+**Existing plaintext state** (written before this) stops its module with
+`encountered unencrypted payload without unencrypted method configured`, and a state
+that still tracks the old CSP data source with `unavailable provider
+"registry.opentofu.org/hashicorp/vault"`. Fix both once:
+
+```bash
+./scripts/encrypt-state.sh           # encrypt, drop the old CSP data source and plaintext backups
+./scripts/encrypt-state.sh --check   # only report; up.sh runs this on every start
+```
+
+It reads and rewrites the state only — nothing is planned or applied, no CSP API is
+called.
+
+> **Back up `container-volume/openbao-data/` together with
+> `init/openbao/secrets/openbao-init.json`.** Without both, an encrypted state can never
+> be read again, and whatever it tracks has to be deleted at the CSP by hand. So
+> `down.sh --wipe` and a re-initialisation of OpenBao refuse to run while an encrypted
+> state exists (`FORCE_WIPE=1` / `FORCE_REINIT=1` override). The `versions` modules do
+> not count — they create nothing, and their catalog cache is simply rebuilt.
+
+---
+
 ## Step 8 — Shut down
 
 ```bash
 ./scripts/down.sh          # stop containers, keep vault data and stored credentials
 ./scripts/down.sh --wipe   # also delete vault data: credentials must be re-entered
 ```
+
+`--wipe` also deletes the key the tofu state is encrypted with, so it refuses to run
+until every environment is torn down ([State encryption](#state-encryption)).
 
 ### Coming back later
 
