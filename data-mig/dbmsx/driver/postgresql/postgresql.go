@@ -567,6 +567,26 @@ func (d *PostgreSQLDriver) Restore(ctx context.Context, loc base.DBMSLocation, i
 	return d.restoreViaSSH(ctx, loc, inputPath, notify)
 }
 
+// resetReplicationRole puts session_replication_role back to DEFAULT after a
+// restore that set it to replica, and never fails the restore over it.
+//
+// DEFAULT returns the session to whatever it started with, which honours a
+// value set for the role or the database, not just the built-in origin. A
+// managed service may refuse it while it allowed replica - Azure Database for
+// PostgreSQL Flexible Server answered 42501 to it - and then the refused
+// statement and its error are logged and the restore goes on: the rows and the
+// constraints are already in, the setting is session-scoped, this connection is
+// closed when the restore returns, and what still runs on it (REFRESH
+// MATERIALIZED VIEW) fires no user trigger, so replica changes nothing there.
+func resetReplicationRole(ctx context.Context, conn *pgx.Conn, database string) {
+	const stmt = "SET session_replication_role = DEFAULT"
+	if _, err := conn.Exec(ctx, stmt); err != nil {
+		logger.Info("postgresql restore could not reset session_replication_role; "+
+			"ignored, as the setting applies only to this restore's connection, which closes next",
+			"database", database, "statement", stmt, "err", err.Error())
+	}
+}
+
 func (d *PostgreSQLDriver) restoreViaSQL(ctx context.Context, loc base.DBMSLocation, inputPath string, notify func(string)) error {
 	conn, err := d.openConn(ctx, loc)
 	if err != nil {
@@ -595,6 +615,10 @@ func (d *PostgreSQLDriver) restoreViaSQL(ctx context.Context, loc base.DBMSLocat
 	// its master account:
 	//
 	//   ERROR: permission denied to set parameter "session_replication_role" (42501)
+	//
+	// Some allow it one way only: Azure Database for PostgreSQL Flexible Server
+	// let its admin set replica, then refused to set it back to DEFAULT with the
+	// same error. Putting it back is therefore best effort (resetReplicationRole).
 	//
 	// So it is attempted, not required. What makes the restore correct without it
 	// is the deferral below: the FK constraints and triggers this dump carries are
@@ -796,9 +820,7 @@ func (d *PostgreSQLDriver) restoreViaSQL(ctx context.Context, loc base.DBMSLocat
 	}
 
 	if replicaRole {
-		if _, err := conn.Exec(ctx, "SET session_replication_role = DEFAULT"); err != nil {
-			return fmt.Errorf("reset session_replication_role: %w", err)
-		}
+		resetReplicationRole(ctx, conn, loc.Database)
 	}
 	if indexMem {
 		if _, err := conn.Exec(ctx, "RESET maintenance_work_mem"); err != nil {
