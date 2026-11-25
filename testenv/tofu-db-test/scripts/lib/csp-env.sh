@@ -16,6 +16,7 @@
 #
 #     aws/*            aws
 #     ncp/*, ncp-target  ncp
+#     alibaba/*, alibaba-target  alibaba
 #     my-target, pg-target  none - they speak the database protocol, and get
 #                      their connection through variables
 #
@@ -38,6 +39,7 @@ _csp_env() {
 		case "$PWD" in
 		/work/tofu/aws/*)                      csp=aws ;;
 		/work/tofu/ncp/*|/work/tofu/ncp-target) csp=ncp ;;
+		/work/tofu/alibaba/*|/work/tofu/alibaba-target) csp=alibaba ;;
 		/work/tofu/my-target|/work/tofu/pg-target) return 0 ;;
 		*) echo "csp-env.sh: no CSP is known for $PWD" >&2; return 1 ;;
 		esac
@@ -60,6 +62,14 @@ _csp_env() {
 	ncp)
 		export NCLOUD_ACCESS_KEY="$(_csp_get NCP_ACCESS_KEY)"
 		export NCLOUD_SECRET_KEY="$(_csp_get NCP_SECRET_KEY)"
+		;;
+	alibaba)
+		# alicloud 2.x and the aliyun CLI read ALIBABA_CLOUD_*; ALICLOUD_* is the
+		# provider's older name for the same pair.
+		export ALIBABA_CLOUD_ACCESS_KEY_ID="$(_csp_get ALIBABA_ACCESS_KEY_ID)"
+		export ALIBABA_CLOUD_ACCESS_KEY_SECRET="$(_csp_get ALIBABA_ACCESS_KEY_SECRET)"
+		export ALICLOUD_ACCESS_KEY="$ALIBABA_CLOUD_ACCESS_KEY_ID"
+		export ALICLOUD_SECRET_KEY="$ALIBABA_CLOUD_ACCESS_KEY_SECRET"
 		;;
 	*)
 		echo "csp-env.sh: unknown CSP '${csp}'" >&2

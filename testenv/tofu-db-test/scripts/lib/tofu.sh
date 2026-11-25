@@ -266,13 +266,17 @@ assert_db_password() {
 #                                     which exposes no public endpoint, so the
 #                                     matrix host cannot reach it
 #   ncp  mysql postgresql mongodb   — there is no managed MariaDB
+#   alibaba  all four               — RDS for the three relational engines,
+#                                     ApsaraDB for MongoDB (a replica set)
 MATRIX_ENGINES_AWS="mysql mariadb postgresql"
 MATRIX_ENGINES_NCP="mysql postgresql mongodb"
+MATRIX_ENGINES_ALIBABA="mysql mariadb postgresql mongodb"
 
 csp_engines() {
 	case "$(lower "$1")" in
 	aws) printf '%s' "$MATRIX_ENGINES_AWS" ;;
 	ncp) printf '%s' "$MATRIX_ENGINES_NCP" ;;
+	alibaba) printf '%s' "$MATRIX_ENGINES_ALIBABA" ;;
 	*)   printf '' ;;
 	esac
 }
@@ -300,10 +304,10 @@ assert_engine_known() {
 	aws:mongodb)
 		fail "AWS has no managed MongoDB this matrix can use."
 		fail "  DocumentDB exposes no public endpoint, so the matrix host cannot reach it,"
-		fail "  and EC2 self-hosting is out of scope. Run it on NCP." ;;
+		fail "  and EC2 self-hosting is out of scope. Run it on NCP or Alibaba." ;;
 	ncp:mariadb)
 		fail "NCP has no managed MariaDB (self-hosted docker only)."
-		fail "  mariadb columns run on AWS only." ;;
+		fail "  mariadb columns run on AWS or Alibaba." ;;
 	*)
 		fail "unknown engine '$engine' ($csp). This CSP supports: $(csp_engines "$csp")" ;;
 	esac
@@ -324,14 +328,133 @@ _versions_json() {
 	cache="${MATRIX_TMP:-/tmp}/versions-$csp.json"
 	if [ ! -f "$cache" ]; then
 		tofu_init "$mod" || { echo '{}' > "$cache"; cat "$cache"; return 1; }
+		# Alibaba lists what is sold in one zone for one edition per engine, so
+		# the module is told which.
+		[ "$csp" = "alibaba" ] && tofu_vars "$mod" "$(jq -n \
+			--arg region "$(csp_env alibaba REGION)" --arg zone "$(csp_env alibaba ZONE)" \
+			--arg my "$(alibaba_category mysql)" --arg ma "$(alibaba_category mariadb)" \
+			--arg pg "$(alibaba_category postgresql)" \
+			'{alibaba_region:$region, alibaba_zone:$zone,
+			  mysql_category:$my, mariadb_category:$ma, postgresql_category:$pg}')"
 		if ! tofu_quiet "$mod" apply -auto-approve -input=false; then
 			tofu_report_warn "$csp catalogue lookup failed ($mod)"
 			echo '{}' > "$cache"
 		else
 			tofu_output "$mod" > "$cache"
 		fi
+		# The provider has no MongoDB catalogue on Alibaba; the CLI's answer is
+		# added under the same keys the other engines use.
+		if [ "$csp" = "alibaba" ]; then
+			local mongo merged
+			mongo="$(_alibaba_mongodb_catalog)"
+			merged="$(jq --argjson m "$mongo" '
+				.suggested_versions.value.mongodb = ($m.versions // [])
+				| .mongodb_classes = {value: ($m.classes // {})}
+				| .mongodb_error = {value: ($m.error // "")}' "$cache")" \
+				&& printf '%s\n' "$merged" > "$cache"
+		fi
 	fi
 	cat "$cache"
+}
+
+# ---------------------------------------------------------------------------
+# Alibaba settings — one place for the defaults, so the version and class
+# checks below ask about exactly what tofu/alibaba/rdbms will be told to create.
+# They match the module's own defaults.
+# ---------------------------------------------------------------------------
+
+# alibaba_setting KEY DEFAULT — ALIBABA_<KEY> from .env, or DEFAULT.
+alibaba_setting() {
+	local v
+	v="$(csp_env alibaba "$1")"
+	printf '%s' "${v:-$2}"
+}
+
+# alibaba_category ENGINE — the RDS edition. MariaDB is sold as
+#   HighAvailability only; the other two default to the single-node Basic.
+alibaba_category() {
+	local engine def
+	engine="$(lower "$1")"
+	case "$engine" in
+	mariadb) def="HighAvailability" ;;
+	mongodb) def="" ;;
+	*)       def="Basic" ;;
+	esac
+	alibaba_setting "$(upper "$engine")_CATEGORY" "$def"
+}
+
+# alibaba_instance_class ENGINE
+alibaba_instance_class() {
+	local engine def
+	engine="$(lower "$1")"
+	case "$engine" in
+	mysql)      def="mysql.n2.medium.1" ;;
+	mariadb)    def="mariadb.n2.medium.2c" ;;
+	postgresql) def="pg.n2.medium.1" ;;
+	mongodb)    def="mdb.shard.4x.large.d" ;;
+	esac
+	alibaba_setting "$(upper "$engine")_INSTANCE_CLASS" "$def"
+}
+
+alibaba_mongodb_storage_type() { alibaba_setting MONGODB_STORAGE_TYPE cloud_essd1; }
+alibaba_mongodb_nodes()        { csp_env_int alibaba MONGODB_NODES 3; }
+
+# _alibaba_mongodb_catalog — the MongoDB versions and classes on sale, as
+#   {"versions":[...], "classes":{"7.0":[...]}, "error":""}.
+#
+#   The alicloud provider has no data source for them, so this is the one call
+#   that goes through the Alibaba Cloud CLI in the runner, as tofuenv's
+#   alibaba-db-versions.sh does: a read-only DescribeAvailableResource for a
+#   pay-as-you-go replica set in ALIBABA_ZONE on the configured storage type.
+#   Only what is sold with the configured node count is kept, since a version
+#   or class sold with 3 nodes may not be sold with 1.
+#
+#   The keys come from OpenBao through csp-env.sh, for this call only; the CLI
+#   is not configured and writes nothing. The region is given twice on
+#   purpose: --RegionId is the API's parameter, ALIBABA_CLOUD_REGION_ID the
+#   CLI's own setting, which it refuses to run without.
+_alibaba_mongodb_catalog() {
+	local region zone stype nodes out rc=0
+	region="$(csp_env alibaba REGION)"
+	zone="$(csp_env alibaba ZONE)"
+	stype="$(alibaba_mongodb_storage_type)"
+	nodes="$(alibaba_mongodb_nodes)"
+
+	out="$(_in_runner alibaba/versions "
+		command -v aliyun >/dev/null 2>&1 || exit 3
+		. /work/scripts/lib/csp-env.sh
+		export ALIBABA_CLOUD_REGION_ID=$(printf '%q' "$region")
+		aliyun dds DescribeAvailableResource --RegionId $(printf '%q' "$region") \
+			--ZoneId $(printf '%q' "$zone") --DbType normal \
+			--InstanceChargeType PostPaid --StorageType $(printf '%q' "$stype")
+	")" || rc=$?
+
+	case "$rc" in
+	0) ;;
+	3)
+		jq -nc '{error: "the tofu runner has no Alibaba Cloud CLI (aliyun): it was built before the CLI was added. Rebuild it: docker compose build tofu-runner && ./scripts/up.sh"}'
+		return 0 ;;
+	*)
+		jq -nc --arg o "$out" '{error: ("aliyun dds DescribeAvailableResource failed: " + $o)}'
+		return 0 ;;
+	esac
+
+	local parsed
+	parsed="$(printf '%s' "$out" | jq -c --arg n "$nodes" '
+		[ .SupportedDBTypes.SupportedDBType[]?.AvailableZones.AvailableZone[]?
+		  .SupportedEngineVersions.SupportedEngineVersion[]?
+		  | .Version as $v
+		  | .SupportedEngines.SupportedEngine[]?.SupportedNodeTypes.SupportedNodeType[]?
+		  | select(.NodeType == $n)
+		  | {v: $v, c: [.AvailableResources.AvailableResource[]?.InstanceClass]} ]
+		| group_by(.v) | map({key: .[0].v, value: (map(.c[]) | unique)}) | from_entries
+		| {versions: keys, classes: ., error: ""}' 2>/dev/null)"
+	# An empty answer parses to nothing at all, so it is caught here too.
+	if [ -z "$parsed" ]; then
+		jq -nc --arg o "${out:-(empty)}" '{error: ("the CLI answer could not be read: " + $o)}'
+		return 0
+	fi
+	printf '%s\n' "$parsed"
 }
 
 # rdbms_supported_versions CSP ENGINE — supported versions, one per line, version-sorted.
@@ -422,10 +545,14 @@ assert_target_versions() {
 	csp="$(lower "$1")"; engine="$(lower "$2")"; wanted="$3"
 	available="$(rdbms_supported_versions "$csp" "$engine")"
 
-	if [ "$csp" = "ncp" ]; then
-		# NCP's catalogue is complete - anything not in it is refused outright.
+	if [ "$csp" = "ncp" ] || [ "$csp" = "alibaba" ]; then
+		# The NCP and Alibaba catalogues are complete - anything not in them is
+		# refused outright.
 		if [ -z "$available" ]; then
-			fail "$csp $engine: no supported-version list came back from the NCP catalogue."
+			fail "$csp $engine: no supported-version list came back from the $(upper "$csp") catalogue."
+			if [ "$csp" = "alibaba" ] && [ "$engine" = "mongodb" ]; then
+				fail "  $(_versions_json alibaba | jq -r '.mongodb_error.value // ""')"
+			fi
 			fail "  Check that credentials are registered (./scripts/up.sh)."
 			return 1
 		fi
@@ -436,9 +563,35 @@ assert_target_versions() {
 		if [ -n "$missing" ]; then
 			fail "$csp $engine: target versions this region does not offer — $missing"
 			fail "  Available: $(printf '%s' "$available" | tr '\n' ' ')"
-			fail "  NCP needs full version strings (8.0.36, not 8.0)."
-			fail "  Fix NCP_$(upper "$engine")_DST_VERSIONS. Nothing was created."
+			if [ "$csp" = "ncp" ]; then
+				fail "  NCP needs full version strings (8.0.36, not 8.0)."
+			else
+				fail "  Alibaba sells version lines (8.0, 14.0), listed for ALIBABA_ZONE=$(csp_env alibaba ZONE)"
+				[ "$engine" = "mongodb" ] \
+					&& fail "  and a replica set of ALIBABA_MONGODB_NODES=$(alibaba_mongodb_nodes) on $(alibaba_mongodb_storage_type)." \
+					|| fail "  and the $(alibaba_category "$engine") edition (ALIBABA_$(upper "$engine")_CATEGORY)."
+			fi
+			fail "  Fix $(upper "$csp")_$(upper "$engine")_DST_VERSIONS. Nothing was created."
 			return 1
+		fi
+		# Alibaba MongoDB: the class as well. tofu/alibaba/rdbms checks an RDS class
+		# at plan time, but the provider has no data source to check a MongoDB one
+		# with, so a wrong one would only fail minutes into the apply.
+		if [ "$csp" = "alibaba" ] && [ "$engine" = "mongodb" ]; then
+			local class sold bad=""
+			class="$(alibaba_instance_class mongodb)"
+			for v in $wanted; do
+				sold="$(_versions_json alibaba | jq -r --arg v "$v" '(.mongodb_classes.value[$v] // []) | join(" ")')"
+				case " $sold " in
+				*" $class "*) ;;
+				*) bad=1; fail "$csp mongodb $v: class $class is not sold with $(alibaba_mongodb_nodes) nodes on $(alibaba_mongodb_storage_type)."
+				   fail "  Sold: ${sold:-(none)}" ;;
+				esac
+			done
+			if [ -n "$bad" ]; then
+				fail "  Fix ALIBABA_MONGODB_INSTANCE_CLASS (or _NODES / _STORAGE_TYPE). Nothing was created."
+				return 1
+			fi
 		fi
 		info "$csp $engine target versions confirmed: $wanted"
 		return 0
@@ -469,57 +622,78 @@ assert_target_versions() {
 }
 
 # ---------------------------------------------------------------------------
-# Network — AWS uses the default VPC as is, so there is nothing to do. NCP only.
+# Network — AWS uses the default VPC as is, so there is nothing to do.
+#   NCP and Alibaba have no default network the matrix can use, so a VPC and
+#   one subnet / vSwitch are created (tofu/<csp>/network).
 # ---------------------------------------------------------------------------
 ensure_network() {
-	local csp="$1"
-	[ "$(lower "$csp")" = "ncp" ] || { info "AWS uses the default VPC — there is no network to create."; return 0; }
+	local csp desc
+	csp="$(lower "$1")"
+	case "$csp" in
+	ncp)     desc="VPC + PUBLIC subnet" ;;
+	alibaba) desc="VPC + vSwitch" ;;
+	*)       info "AWS uses the default VPC — there is no network to create."; return 0 ;;
+	esac
 
-	local mod="ncp/network"
+	local mod="$csp/network"
 	tofu_init "$mod" || return 1
-	tofu_vars "$mod" "$(jq -n \
-		--arg region "$(csp_env ncp REGION)" \
-		--arg zone "$(csp_env ncp ZONE)" \
-		--arg prefix "$MATRIX_NAME_PREFIX" \
-		--arg cidr "$(csp_env ncp VPC_CIDR)" \
-		'{ncp_region:$region, ncp_zone:$zone, name_prefix:$prefix}
-		 + (if $cidr == "" then {} else {ncp_vpc_cidr:$cidr} end)')"
+	if [ "$csp" = "ncp" ]; then
+		tofu_vars "$mod" "$(jq -n \
+			--arg region "$(csp_env ncp REGION)" \
+			--arg zone "$(csp_env ncp ZONE)" \
+			--arg prefix "$MATRIX_NAME_PREFIX" \
+			--arg cidr "$(csp_env ncp VPC_CIDR)" \
+			'{ncp_region:$region, ncp_zone:$zone, name_prefix:$prefix}
+			 + (if $cidr == "" then {} else {ncp_vpc_cidr:$cidr} end)')"
+	else
+		tofu_vars "$mod" "$(jq -n \
+			--arg region "$(csp_env alibaba REGION)" \
+			--arg zone "$(csp_env alibaba ZONE)" \
+			--arg prefix "$MATRIX_NAME_PREFIX" \
+			--arg cidr "$(csp_env alibaba VPC_CIDR)" \
+			'{alibaba_region:$region, alibaba_zone:$zone, name_prefix:$prefix}
+			 + (if $cidr == "" then {} else {alibaba_vpc_cidr:$cidr} end)')"
+	fi
 
 	if tofu_has_state "$mod"; then
 		local existing
 		existing="$(tofu_out_value "$(tofu_output "$mod")" vpc_name)"
 		if [ -n "$existing" ] && [ "$existing" != "${MATRIX_NAME_PREFIX}-vpc" ]; then
-			fail "the existing ncp/network was created under a different prefix."
+			fail "the existing $mod was created under a different prefix."
 			fail "  existing: $existing        current: ${MATRIX_NAME_PREFIX}-vpc"
 			fail "  The rdbms module looks the VPC and subnet up by name, so the lookup comes back empty."
 			fail "  Put MATRIX_NAME_PREFIX back to '${existing%-vpc}', or destroy the network and rebuild it:"
-			fail "    ./scripts/ncp-db-matrix.sh --cleanup"
+			fail "    ./scripts/$csp-db-matrix.sh --cleanup"
 			return 1
 		fi
-		info "ncp/network — already there ($existing)"
+		info "$mod — already there ($existing)"
 		return 0
 	fi
 
-	step "creating ncp/network (VPC + PUBLIC subnet)"
+	step "creating $mod ($desc)"
 	if ! tofu_run "$mod" apply -auto-approve -input=false; then
-		tofu_report "could not create ncp/network"
+		tofu_report "could not create $mod"
 		return 1
 	fi
-	ok "ncp/network ready"
+	ok "$mod ready"
 }
 
 release_network() {
-	local csp="$1" mod="ncp/network"
-	[ "$(lower "$csp")" = "ncp" ] || return 0
+	local csp mod
+	csp="$(lower "$1")"
+	case "$csp" in
+	ncp|alibaba) mod="$csp/network" ;;
+	*) return 0 ;;
+	esac
 	tofu_has_state "$mod" || return 0
-	step "destroying ncp/network"
+	step "destroying $mod"
 	if tofu_run "$mod" destroy -auto-approve -input=false; then
-		ok "ncp/network destroyed"
+		ok "$mod destroyed"
 		return 0
 	fi
 	# The CSP may still be releasing the servers. What was asked for is already
 	# gone, so this is a warning rather than a failure; running again finishes it.
-	tofu_report_warn "could not destroy ncp/network — run again in a moment to finish it."
+	tofu_report_warn "could not destroy $mod — run again in a moment to finish it."
 	return 1
 }
 
@@ -573,6 +747,34 @@ _ncp_rdbms_vars() {
 		--arg cidr "$MATRIX_ALLOWED_CIDR" \
 		'{engine:$engine, engine_version:$version, ncp_region:$region,
 		  name_prefix:$prefix, db_name:$db, allowed_cidr:$cidr}
+		 + (if $user == "" then {} else {db_username:$user} end)'
+}
+
+# _alibaba_rdbms_vars ENGINE VERSION — the class, edition and MongoDB sizing are
+#   always passed, resolved through the alibaba_* helpers, so the module creates
+#   exactly what assert_target_versions checked.
+_alibaba_rdbms_vars() {
+	local engine="$1"
+	jq -n \
+		--arg engine "$engine" --arg version "$2" \
+		--arg region "$(csp_env alibaba REGION)" \
+		--arg zone "$(csp_env alibaba ZONE)" \
+		--arg prefix "$MATRIX_NAME_PREFIX" \
+		--arg db "$ADMIN_DB" \
+		--arg user "$(csp_env alibaba DB_ADMIN_USERNAME)" \
+		--arg cidr "$MATRIX_ALLOWED_CIDR" \
+		--arg class "$(alibaba_instance_class "$engine")" \
+		--arg category "$(alibaba_category "$engine")" \
+		--argjson storage "$(csp_env_int alibaba DB_STORAGE_GB 20)" \
+		--arg stype "$(alibaba_setting DB_STORAGE_TYPE cloud_essd)" \
+		--argjson mstorage "$(csp_env_int alibaba MONGODB_STORAGE_GB 20)" \
+		--arg mstype "$(alibaba_mongodb_storage_type)" \
+		--argjson nodes "$(alibaba_mongodb_nodes)" \
+		'{engine:$engine, engine_version:$version, alibaba_region:$region,
+		  alibaba_zone:$zone, name_prefix:$prefix, db_name:$db, allowed_cidr:$cidr,
+		  instance_class:$class, category:$category,
+		  storage_gb:$storage, storage_type:$stype,
+		  mongodb_storage_gb:$mstorage, mongodb_storage_type:$mstype, mongodb_nodes:$nodes}
 		 + (if $user == "" then {} else {db_username:$user} end)'
 }
 
@@ -646,11 +848,11 @@ create_rdbms() {
 	tofu_init "$mod" || return 1
 	tofu_workspace "$mod" "$ws" || return 1
 
-	if [ "$csp" = "aws" ]; then
-		tofu_vars "$mod" "$(_aws_rdbms_vars "$csp_engine" "$version")"
-	else
-		tofu_vars "$mod" "$(_ncp_rdbms_vars "$csp_engine" "$version")"
-	fi
+	case "$csp" in
+	aws)     tofu_vars "$mod" "$(_aws_rdbms_vars "$csp_engine" "$version")" ;;
+	alibaba) tofu_vars "$mod" "$(_alibaba_rdbms_vars "$csp_engine" "$version")" ;;
+	*)       tofu_vars "$mod" "$(_ncp_rdbms_vars "$csp_engine" "$version")" ;;
+	esac
 
 	if tofu_has_state "$mod"; then
 		if [ "${REUSE_INSTANCE:-1}" != "1" ]; then
@@ -771,7 +973,7 @@ cleanup_all_workspaces() {
 	# A cell module may have died halfway - cell-level resources are collected too.
 	# init comes first: with state but no provider, destroy cannot even start.
 	local cell_mod
-	for cell_mod in pg-target my-target ncp-target; do
+	for cell_mod in pg-target my-target ncp-target alibaba-target; do
 		tofu_init "$cell_mod" >/dev/null 2>&1 || true
 		if tofu_has_state "$cell_mod"; then
 			sub "reclaiming leftover $cell_mod"
@@ -971,16 +1173,20 @@ PG_TARGET_SCHEMA=""
 #                                  also takes an owner, which removes the schema
 #                                  public problem instead of working around it.
 #
-#   MongoDB has no CREATE DATABASE on either CSP, so it has no module at all.
+#     alibaba  alibaba-target      the CSP API too (alicloud_db_database), the way
+#                                  tofuenv creates its Alibaba databases. On
+#                                  PostgreSQL it takes the owner (DBOwner).
+#
+#   MongoDB has no CREATE DATABASE on any CSP, so it has no module at all.
 target_db_module() {
 	local csp="$(lower "$1")" engine="$(lower "$2")"
 	case "$engine" in
 	mongodb) printf ''; return ;;
 	esac
-	if [ "$csp" = "ncp" ]; then
-		printf 'ncp-target'
-		return
-	fi
+	case "$csp" in
+	ncp)     printf 'ncp-target'; return ;;
+	alibaba) printf 'alibaba-target'; return ;;
+	esac
 	case "$engine" in
 	postgresql)     printf 'pg-target' ;;
 	mysql|mariadb)  printf 'my-target' ;;
@@ -1013,6 +1219,17 @@ _target_db_vars() {
 			--arg region "$(csp_env ncp REGION)" \
 			'{engine:$engine, instance_no:$no, databases:$dbs, owner:$owner}
 			 + (if $region == "" then {} else {ncp_region:$region} end)'
+		return
+	fi
+
+	# Alibaba: the RDS API as well, addressed by the instance ID.
+	if [ "$(lower "$csp")" = "alibaba" ]; then
+		jq -n \
+			--arg engine "$(lower "$engine")" --arg no "$RDBMS_INSTANCE_NO" \
+			--argjson dbs "$json" --arg owner "$RDBMS_USER" \
+			--arg region "$(csp_env alibaba REGION)" \
+			'{engine:$engine, instance_no:$no, databases:$dbs, owner:$owner}
+			 + (if $region == "" then {} else {alibaba_region:$region} end)'
 		return
 	fi
 
@@ -1069,7 +1286,15 @@ target_db_create() {
 		return 1
 	fi
 
-	if [ "$(lower "$engine")" = "postgresql" ]; then
+	if [ "$mod" = "alibaba-target" ]; then
+		# Through the RDS API: an owner (DBOwner) on PostgreSQL, utf8mb4 on MySQL /
+		# MariaDB, no template and no GRANT.
+		if [ "$(lower "$engine")" = "postgresql" ]; then
+			info "target database created: $dbs  (owner $RDBMS_USER, via the Alibaba API)"
+		else
+			info "target database created: $dbs  (utf8mb4, via the Alibaba API)"
+		fi
+	elif [ "$(lower "$engine")" = "postgresql" ]; then
 		if [ "$mod" = "ncp-target" ]; then
 			# ncp-target creates through the CSP API, which takes an owner and no
 			# template, and issues no GRANT - so neither of those is reported here.
@@ -1269,6 +1494,6 @@ explain_insecure_transport() {
 		fail "    parameter group, on AWS only. Currently: ${AWS_TARGET_SECURE_TRANSPORT:-csp-default}"
 		fail "    ⚠ A result obtained that way is not a result against CSP defaults."
 	else
-		fail "    On NCP the matrix cannot switch this parameter off — there is no API for it."
+		fail "    On $(upper "${2:-this CSP}") the matrix cannot switch this parameter off — there is no API for it."
 	fi
 }

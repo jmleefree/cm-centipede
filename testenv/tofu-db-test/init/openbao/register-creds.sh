@@ -7,6 +7,8 @@
 #     secret/db/aws   <- AWS_DB_PASSWORD
 #     secret/csp/ncp  <- NCP_ACCESS_KEY, NCP_SECRET_KEY
 #     secret/db/ncp   <- NCP_DB_PASSWORD
+#     secret/csp/alibaba <- ALIBABA_ACCESS_KEY_ID, ALIBABA_ACCESS_KEY_SECRET
+#     secret/db/alibaba  <- ALIBABA_DB_PASSWORD  (RDS and MongoDB share it)
 #
 #   Idempotency:
 #     - A group is skipped when its "trigger" key is empty, so re-running after
@@ -135,6 +137,39 @@ if [ -n "${NCP_DB_PASSWORD:-}" ]; then
     echo -e "  ${GREEN}OK${NC}   NCP_DB_PASSWORD passed the provider rule check"
 fi
 
+# Validate the Alibaba DB password against the rules RDS and MongoDB both
+# enforce (the same check as tofuenv): 8-32 characters, only letters, digits and
+# ! $ ^ & * ( ) _ + - =, and at least three of uppercase / lowercase / digits /
+# special characters. Otherwise the create call refuses it minutes into an apply.
+validate_alibaba_db_password() {
+    local pw="$1"
+    local len=${#pw}
+    local kinds=0
+    if [ "$len" -lt 8 ] || [ "$len" -gt 32 ]; then
+        echo "must be 8-32 characters (currently ${len})"; return 1
+    fi
+    if printf '%s' "$pw" | LC_ALL=C grep -q '[^A-Za-z0-9!$^&*()_+=-]'; then
+        echo "may contain only letters, digits and ! \$ ^ & * ( ) _ + - ="; return 1
+    fi
+    printf '%s' "$pw" | LC_ALL=C grep -q '[A-Z]'           && kinds=$((kinds + 1))
+    printf '%s' "$pw" | LC_ALL=C grep -q '[a-z]'           && kinds=$((kinds + 1))
+    printf '%s' "$pw" | LC_ALL=C grep -q '[0-9]'           && kinds=$((kinds + 1))
+    printf '%s' "$pw" | LC_ALL=C grep -q '[!$^&*()_+=-]'   && kinds=$((kinds + 1))
+    if [ "$kinds" -lt 3 ]; then
+        echo "must mix at least three of uppercase, lowercase, digits and special characters (has ${kinds})"; return 1
+    fi
+    return 0
+}
+
+if [ -n "${ALIBABA_DB_PASSWORD:-}" ]; then
+    if ! reason=$(validate_alibaba_db_password "$ALIBABA_DB_PASSWORD"); then
+        echo -e "  ${RED}FAIL${NC} ALIBABA_DB_PASSWORD rejected: ${reason}" >&2
+        echo -e "  ${YELLOW}See the Alibaba password rules in .env.example.${NC}" >&2
+        exit 1
+    fi
+    echo -e "  ${GREEN}OK${NC}   ALIBABA_DB_PASSWORD passed the RDS + MongoDB rule check"
+fi
+
 register_group "csp/aws" "AWS_SECRET_ACCESS_KEY" \
     AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 register_group "db/aws" "AWS_DB_PASSWORD" \
@@ -143,6 +178,10 @@ register_group "csp/ncp" "NCP_SECRET_KEY" \
     NCP_ACCESS_KEY NCP_SECRET_KEY
 register_group "db/ncp" "NCP_DB_PASSWORD" \
     NCP_DB_PASSWORD
+register_group "csp/alibaba" "ALIBABA_ACCESS_KEY_SECRET" \
+    ALIBABA_ACCESS_KEY_ID ALIBABA_ACCESS_KEY_SECRET
+register_group "db/alibaba" "ALIBABA_DB_PASSWORD" \
+    ALIBABA_DB_PASSWORD
 
 # Blank the keys that were registered successfully
 if [ "${#KEYS_TO_BLANK[@]}" -gt 0 ]; then

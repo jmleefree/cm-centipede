@@ -706,7 +706,7 @@ matrix_main() {
 	fi
 
 	banner "0. pre-flight — $CSP_TITLE managed-RDBMS version matrix"
-	info "name prefix : $MATRIX_NAME_PREFIX   region: $(csp_env "$CSP" REGION)$([ "$(lower "$CSP")" = "ncp" ] && printf '   zone: %s' "$(csp_env "$CSP" ZONE)")"
+	info "name prefix : $MATRIX_NAME_PREFIX   region: $(csp_env "$CSP" REGION)$(case "$(lower "$CSP")" in ncp|alibaba) printf '   zone: %s' "$(csp_env "$CSP" ZONE)" ;; esac)"
 	info "tofu runner : $TOFU_RUNNER   OpenBao: ${VAULT_ADDR:-http://localhost:38210}"
 	info "collect/move: honeybee $HB_BASE   centipede $CP_BASE"
 	info "engines     : $engines   (offered as managed by this CSP: $(csp_engines "$CSP"))"
@@ -736,9 +736,9 @@ matrix_main() {
 
 	local missing=""
 	[ -n "$(csp_env "$CSP" REGION)" ] || missing="$missing $(upper "$CSP")_REGION"
-	if [ "$(lower "$CSP")" = "ncp" ]; then
-		[ -n "$(csp_env "$CSP" ZONE)" ] || missing="$missing NCP_ZONE"
-	fi
+	case "$(lower "$CSP")" in
+	ncp|alibaba) [ -n "$(csp_env "$CSP" ZONE)" ] || missing="$missing $(upper "$CSP")_ZONE" ;;
+	esac
 	[ -n "$missing" ] && die "these settings are empty:$missing
        Fill them in in $ENV_FILE."
 

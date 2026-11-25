@@ -44,7 +44,8 @@ check_env_perm() {
 # them into OpenBao.
 PLACEHOLDER_VARS="CP_USER CP_PASS SRC_DB_PASS DB_ROOT_PASS
 AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DB_PASSWORD
-NCP_ACCESS_KEY NCP_SECRET_KEY NCP_DB_PASSWORD"
+NCP_ACCESS_KEY NCP_SECRET_KEY NCP_DB_PASSWORD
+ALIBABA_ACCESS_KEY_ID ALIBABA_ACCESS_KEY_SECRET ALIBABA_DB_PASSWORD"
 
 # assert_no_placeholder — refuse to run while any of PLACEHOLDER_VARS is unset or
 #   still holds ChangeMe (case-insensitive, surrounding whitespace ignored).

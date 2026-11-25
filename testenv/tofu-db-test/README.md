@@ -63,20 +63,26 @@ The source is built from the vendor's apt repository, so all four engines work
 there. The **target** is limited to what the CSP offers as a managed service —
 self-hosted targets are out of scope.
 
-| Engine | AWS target | NCP target |
-|---|---|---|
-| mysql | RDS | Cloud DB for MySQL |
-| mariadb | RDS | **none** — NCP has no managed MariaDB |
-| postgresql | RDS | Cloud DB for PostgreSQL |
-| mongodb | **none** — see below | Cloud DB for MongoDB (STAND_ALONE) |
+| Engine | AWS target | NCP target | Alibaba target |
+|---|---|---|---|
+| mysql | RDS | Cloud DB for MySQL | ApsaraDB RDS |
+| mariadb | RDS | **none** — NCP has no managed MariaDB | ApsaraDB RDS (HighAvailability only) |
+| postgresql | RDS | Cloud DB for PostgreSQL | ApsaraDB RDS |
+| mongodb | **none** — see below | Cloud DB for MongoDB (STAND_ALONE) | ApsaraDB for MongoDB (replica set) |
 
 **Why no MongoDB on AWS.** The only managed option is DocumentDB, which exposes
 no public endpoint; a client outside the VPC cannot reach it without a tunnel or
 a VPN. Running MongoDB on EC2 would work but is self-hosting, which this tool
-does not do. Use NCP for mongodb columns.
+does not do. Use NCP or Alibaba for mongodb columns.
 
 **Why no MariaDB on NCP.** NCP offers MariaDB only as something you install
-yourself on a server. Use AWS for mariadb columns.
+yourself on a server. Use AWS or Alibaba for mariadb columns.
+
+**Alibaba runs all four.** Its public endpoints are created through the API, so
+unlike NCP there is no console step. The differences worth knowing: MariaDB is
+sold as HighAvailability only, so a standby is billed too; and a MongoDB target
+is a replica set reached as `root` through the Primary's public address, with
+`directConnection=true`.
 
 An impossible combination is refused by `assert_engine_known`
 (`scripts/lib/tofu.sh`) **before anything is created**, with the reason and what
@@ -118,6 +124,7 @@ green.
 ```bash
 ./scripts/aws-db-matrix.sh                    # everything in AWS_ENGINES
 ./scripts/ncp-db-matrix.sh --engines postgresql
+./scripts/alibaba-db-matrix.sh --engines mysql --dst-versions "8.0"
 ./scripts/aws-db-matrix.sh --only 8.4:8.0     # one cell of an existing matrix
 ./scripts/aws-db-matrix.sh --tls-mode require # demand TLS instead of preferring it
 ./scripts/aws-db-matrix.sh --cleanup          # reclaim what an interrupted run left
@@ -143,7 +150,7 @@ read a `.env` anyone else can. See [Credentials](#credentials).
             |
  Step 4  ./scripts/<csp>-db-matrix.sh        the matrix itself
             |    ├ pre-flight    honeybee, centipede, stack, credentials, versions
-            |    ├ network       NCP only: VPC + PUBLIC subnet
+            |    ├ network       NCP: VPC + PUBLIC subnet, Alibaba: VPC + vSwitch
             |    └ per column    prepare -> [NCP: console step] -> probe -> cells -> destroy
             |
  Step 5  logs/<csp>-db-matrix.log
@@ -201,7 +208,8 @@ You type keys into `.env`; `up.sh` moves them into OpenBao and blanks them in th
 file. Before every tofu command that configures providers, `_in_runner`
 (`scripts/lib/tofu.sh`) sources `scripts/lib/csp-env.sh`, which reads the CSP keys
 and exports them as the providers' own environment variables
-(`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `NCLOUD_ACCESS_KEY`/`NCLOUD_SECRET_KEY`).
+(`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `NCLOUD_ACCESS_KEY`/`NCLOUD_SECRET_KEY`,
+`ALIBABA_CLOUD_ACCESS_KEY_ID`/`ALIBABA_CLOUD_ACCESS_KEY_SECRET`).
 They never pass through a data source, so they never enter the state. The rdbms
 modules still read the DB master password through the `vault` provider, because
 the instance resource keeps it in the state anyway. That is why the state is
@@ -216,6 +224,8 @@ encrypted (see [State encryption](#state-encryption)).
     secret/csp/ncp   NCP_ACCESS_KEY / NCP_SECRET_KEY
     secret/db/aws    AWS_DB_PASSWORD
     secret/db/ncp    NCP_DB_PASSWORD
+    secret/csp/alibaba  ALIBABA_ACCESS_KEY_ID / ALIBABA_ACCESS_KEY_SECRET
+    secret/db/alibaba   ALIBABA_DB_PASSWORD (RDS and MongoDB share it)
       │
       ├──▶ lib/csp-env.sh (env vars)      CSP keys for the providers
       ├──▶ tofu provider "vault"          DB password for the rdbms modules
@@ -223,8 +233,8 @@ encrypted (see [State encryption](#state-encryption)).
       └──▶ Transit key tofu-state         encrypts every tofu state
 ```
 
-`register-creds.sh` validates the NCP password against the rules the ncloud
-provider enforces **before** anything is prepared. Without that check, NCP
+`register-creds.sh` validates the NCP and Alibaba passwords against the rules
+each CSP enforces **before** anything is prepared. Without that check, NCP
 reports the violation as a failed creation about 30 minutes later.
 
 ### What this protects, and what it does not
@@ -282,7 +292,10 @@ reading it needs OpenBao unsealed.
 | `my-target` | `mysql_database` | per **AWS** MySQL/MariaDB cell |
 | `pg-target` | `postgresql_database` + optional `postgresql_grant` | per **AWS** PostgreSQL cell |
 | `ncp-target` | `ncloud_mysql_databases` / `ncloud_postgresql_databases` | per **NCP** cell |
-| `aws/versions`, `ncp/versions` | nothing — data sources only | on demand |
+| `alibaba/network` | VPC + vSwitch | once per run |
+| `alibaba/rdbms` | one `alicloud_db_instance` + account + admin database + public connection, or one `alicloud_mongodb_instance` + public address | per column |
+| `alibaba-target` | `alicloud_db_database` (DBOwner on PostgreSQL) | per **Alibaba** MySQL/MariaDB/PostgreSQL cell |
+| `aws/versions`, `ncp/versions`, `alibaba/versions` | nothing — data sources only | on demand |
 
 **Why a cell's databases are made two different ways.** On AWS the master
 account is a real administrator, so `my-target` and `pg-target` connect to the
@@ -290,7 +303,9 @@ instance and run `CREATE DATABASE`. On NCP it is not: its managed databases are
 administered through the CSP, the master account holds rights on the databases
 the service knows about, and creating one over the wire is refused —
 `Error 1044 (42000): Access denied for user 'dbadmin'@'%' to database
-'cptfm_probe'`. So NCP cells go through the CSP API instead.
+'cptfm_probe'`. So NCP cells go through the CSP API instead. Alibaba cells do
+the same (`alibaba-target`, `alicloud_db_database`), which is also how tofuenv
+creates its Alibaba databases.
 
 The API also takes an **owner** at creation time, which a wire-protocol
 `CREATE DATABASE` would leave as whoever connected. That is worth having, but it
@@ -346,7 +361,7 @@ recognised by name in a console.
 | Step | What happens |
 |---|---|
 | 1 | Build the source image if this version has none, start the container, wait for `matrix-init.service` |
-| 2 | Create the empty target database — `my-target` / `pg-target` on AWS, `ncp-target` on NCP |
+| 2 | Create the empty target database — `my-target` / `pg-target` on AWS, `ncp-target` on NCP, `alibaba-target` on Alibaba |
 | 3 | Register the source with cm-honeybee and collect it (`import/db`) |
 | 4 | `POST /plans/target` — **a downgrade is refused here, and the cell is BLOCK** |
 | 5 | `POST /migration`, then poll until it settles |
@@ -604,6 +619,7 @@ release.
 ```bash
 ./scripts/aws-db-versions.sh              # read-only
 ./scripts/ncp-db-versions.sh
+./scripts/alibaba-db-versions.sh
 ./scripts/aws-db-versions.sh --write      # write the result into *_DST_VERSIONS
 ```
 
@@ -613,3 +629,13 @@ summary**: the provider has no data source that lists every version, so
 not unavailable — put the version in `<CSP>_<engine>_DST_VERSIONS` and the plan
 decides. The authoritative check is the matrix's own `tofu plan` per target
 version, which also catches "cannot be ordered with this instance class".
+
+**Alibaba's catalog is complete for what it is asked**: the RDS versions sold in
+`ALIBABA_ZONE` for the edition each engine is created with
+(`ALIBABA_<ENGINE>_CATEGORY`). The provider has no data source for MongoDB, so
+its versions and classes come from the Alibaba Cloud CLI in the tofu runner
+(`aliyun dds DescribeAvailableResource`, read-only), filtered by
+`ALIBABA_MONGODB_NODES` and `ALIBABA_MONGODB_STORAGE_TYPE`. The matrix refuses a
+MongoDB version or class that is not on sale before anything is created; an RDS
+class is checked by the plan of `tofu/alibaba/rdbms`, which lists the classes
+that are sold when it does not fit.

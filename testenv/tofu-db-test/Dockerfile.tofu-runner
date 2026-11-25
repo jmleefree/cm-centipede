@@ -1,5 +1,6 @@
 # OpenTofu runner (a long-lived container)
-#   Ships tofu, curl, jq, git, openssh-client, psql and bash.
+#   Ships tofu, the Alibaba Cloud CLI (aliyun), curl, jq, git, openssh-client,
+#   psql and bash.
 #   lib/tofu.sh runs its tofu commands in this container through docker exec.
 #
 #   psql is here for one job: the privilege pre-flight that decides whether a
@@ -10,6 +11,10 @@ FROM debian:12-slim
 # Override the version at build time if needed: --build-arg TOFU_VERSION=1.9.1
 ARG TOFU_VERSION=1.9.1
 ARG TARGETARCH=amd64
+# The Alibaba Cloud CLI, for what the alicloud provider has no data source for:
+# the MongoDB versions and classes (DescribeAvailableResource), which the
+# Alibaba matrix checks before creating anything. --build-arg ALIYUN_CLI_VERSION=x.y.z
+ARG ALIYUN_CLI_VERSION=3.5.2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl unzip ca-certificates bash jq git openssh-client postgresql-client \
@@ -21,6 +26,18 @@ RUN curl -fsSL "https://github.com/opentofu/opentofu/releases/download/v${TOFU_V
     && chmod +x /usr/local/bin/tofu \
     && rm /tmp/tofu.zip \
     && tofu version
+
+# Install the Alibaba Cloud CLI, checked against the release's SHASUMS256.txt.
+# It holds no credentials: lib/tofu.sh hands it the keys from OpenBao as
+# ALIBABA_CLOUD_ACCESS_KEY_ID / _SECRET for one call, and nothing is configured.
+RUN cd /tmp \
+    && curl -fsSLO "https://github.com/aliyun/aliyun-cli/releases/download/v${ALIYUN_CLI_VERSION}/aliyun-cli-linux-${ALIYUN_CLI_VERSION}-${TARGETARCH}.tgz" \
+    && curl -fsSLO "https://github.com/aliyun/aliyun-cli/releases/download/v${ALIYUN_CLI_VERSION}/SHASUMS256.txt" \
+    && grep " aliyun-cli-linux-${ALIYUN_CLI_VERSION}-${TARGETARCH}.tgz\$" SHASUMS256.txt | sha256sum -c - \
+    && tar -xzf "aliyun-cli-linux-${ALIYUN_CLI_VERSION}-${TARGETARCH}.tgz" -C /usr/local/bin aliyun \
+    && chmod +x /usr/local/bin/aliyun \
+    && rm -f /tmp/aliyun-cli-*.tgz /tmp/SHASUMS256.txt \
+    && aliyun version
 
 # Provider plugin cache, reused across modules to speed up init.
 ENV TF_PLUGIN_CACHE_DIR=/work/.tofu-plugin-cache

@@ -351,12 +351,16 @@ mongodb_drop_target() {
 	verify-full) tls="--tls" ;;
 	esac
 
+	# directConnection=true, as data-mig always sets it: an Alibaba target is a
+	# replica set reached through the Primary's public address, and discovery
+	# would go on to the members' private addresses. A standalone (NCP) is
+	# unaffected.
 	for db in $dbs; do
 		out="$(docker exec "$name" mongosh --quiet $tls \
-			--host "$RDBMS_HOST" --port "$RDBMS_PORT" \
+			"mongodb://$RDBMS_HOST:$RDBMS_PORT/$db?directConnection=true" \
 			-u "$RDBMS_USER" -p "$(vault_db_password "$(lower "$CSP")")" \
 			--authenticationDatabase "${MONGODB_AUTH_SOURCE:-admin}" \
-			"$db" --eval 'db.dropDatabase()' 2>&1)" || true
+			--eval 'db.dropDatabase()' 2>&1)" || true
 		# Dropping a database that is not there is not an error. Only a failure to
 		# connect is reported.
 		case "$out" in

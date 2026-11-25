@@ -117,6 +117,12 @@ db_versions_main() {
 		while IFS= read -r hint; do info "  $hint"; done \
 			<<< "$(aws_full_list_hint mariadb "$region")"
 	fi
+	if [ "$(lower "$CSP")" = "alibaba" ]; then
+		info "Listed for zone $(csp_env alibaba ZONE) and the edition each engine is created with:"
+		info "  mysql $(alibaba_category mysql), mariadb $(alibaba_category mariadb), postgresql $(alibaba_category postgresql)"
+		info "  mongodb: a replica set of $(alibaba_mongodb_nodes) nodes on $(alibaba_mongodb_storage_type), from the Alibaba Cloud CLI"
+		info "  (the provider has no MongoDB catalogue)."
+	fi
 
 	for engine in $engines; do
 		mark=" "
@@ -129,6 +135,9 @@ db_versions_main() {
 
 		if [ -z "$versions" ]; then
 			fail "$mark $(printf '%-11s' "$engine") could not read the supported versions — check that credentials are registered (./scripts/up.sh)."
+			if [ "$(lower "$CSP")" = "alibaba" ] && [ "$engine" = "mongodb" ]; then
+				fail "    $(_versions_json alibaba | jq -r '.mongodb_error.value // ""')"
+			fi
 			missing=$((missing + 1))
 			continue
 		fi
