@@ -63,17 +63,17 @@ The source is built from the vendor's apt repository, so all four engines work
 there. The **target** is limited to what the CSP offers as a managed service —
 self-hosted targets are out of scope.
 
-| Engine | AWS target | NCP target | Alibaba target |
-|---|---|---|---|
-| mysql | RDS | Cloud DB for MySQL | ApsaraDB RDS |
-| mariadb | RDS | **none** — NCP has no managed MariaDB | ApsaraDB RDS (HighAvailability only) |
-| postgresql | RDS | Cloud DB for PostgreSQL | ApsaraDB RDS |
-| mongodb | **none** — see below | Cloud DB for MongoDB (STAND_ALONE) | ApsaraDB for MongoDB (replica set) |
+| Engine | AWS target | NCP target | Alibaba target | Azure target |
+|---|---|---|---|---|
+| mysql | RDS | Cloud DB for MySQL | ApsaraDB RDS | Flexible Server |
+| mariadb | RDS | **none** — NCP has no managed MariaDB | ApsaraDB RDS (HighAvailability only) | **none** — retired 2025-09-19 |
+| postgresql | RDS | Cloud DB for PostgreSQL | ApsaraDB RDS | Flexible Server |
+| mongodb | **none** — see below | Cloud DB for MongoDB (STAND_ALONE) | ApsaraDB for MongoDB (replica set) | Cosmos DB for MongoDB vCore |
 
 **Why no MongoDB on AWS.** The only managed option is DocumentDB, which exposes
 no public endpoint; a client outside the VPC cannot reach it without a tunnel or
 a VPN. Running MongoDB on EC2 would work but is self-hosting, which this tool
-does not do. Use NCP or Alibaba for mongodb columns.
+does not do. Use NCP, Alibaba or Azure for mongodb columns.
 
 **Why no MariaDB on NCP.** NCP offers MariaDB only as something you install
 yourself on a server. Use AWS or Alibaba for mariadb columns.
@@ -83,6 +83,15 @@ unlike NCP there is no console step. The differences worth knowing: MariaDB is
 sold as HighAvailability only, so a standby is billed too; and a MongoDB target
 is a replica set reached as `root` through the Primary's public address, with
 `directConnection=true`.
+
+**Azure is closest to AWS.** No network module (public access and a firewall
+rule per server), a resource group per column, and the cells' databases made by
+`my-target` / `pg-target`, since the Flexible Server admin may `CREATE
+DATABASE`. Azure Database for MariaDB was retired. **MongoDB vCore is not
+MongoDB itself**, and two things follow from it: it hands out only a
+`mongodb+srv://` string, so the matrix resolves the SRV record to the host and
+port data-mig connects to; and it requires TLS, so its cells run at `require`
+under the default `prefer`.
 
 An impossible combination is refused by `assert_engine_known`
 (`scripts/lib/tofu.sh`) **before anything is created**, with the reason and what
@@ -125,6 +134,7 @@ green.
 ./scripts/aws-db-matrix.sh                    # everything in AWS_ENGINES
 ./scripts/ncp-db-matrix.sh --engines postgresql
 ./scripts/alibaba-db-matrix.sh --engines mysql --dst-versions "8.0"
+./scripts/azure-db-matrix.sh --engines postgresql --dst-versions "16"
 ./scripts/aws-db-matrix.sh --only 8.4:8.0     # one cell of an existing matrix
 ./scripts/aws-db-matrix.sh --tls-mode require # demand TLS instead of preferring it
 ./scripts/aws-db-matrix.sh --cleanup          # reclaim what an interrupted run left
@@ -209,7 +219,8 @@ file. Before every tofu command that configures providers, `_in_runner`
 (`scripts/lib/tofu.sh`) sources `scripts/lib/csp-env.sh`, which reads the CSP keys
 and exports them as the providers' own environment variables
 (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `NCLOUD_ACCESS_KEY`/`NCLOUD_SECRET_KEY`,
-`ALIBABA_CLOUD_ACCESS_KEY_ID`/`ALIBABA_CLOUD_ACCESS_KEY_SECRET`).
+`ALIBABA_CLOUD_ACCESS_KEY_ID`/`ALIBABA_CLOUD_ACCESS_KEY_SECRET`,
+`ARM_CLIENT_ID`/`ARM_CLIENT_SECRET`/`ARM_TENANT_ID`/`ARM_SUBSCRIPTION_ID`).
 They never pass through a data source, so they never enter the state. The rdbms
 modules still read the DB master password through the `vault` provider, because
 the instance resource keeps it in the state anyway. That is why the state is
@@ -226,6 +237,8 @@ encrypted (see [State encryption](#state-encryption)).
     secret/db/ncp    NCP_DB_PASSWORD
     secret/csp/alibaba  ALIBABA_ACCESS_KEY_ID / ALIBABA_ACCESS_KEY_SECRET
     secret/db/alibaba   ALIBABA_DB_PASSWORD (RDS and MongoDB share it)
+    secret/csp/azure    AZURE_CLIENT_ID / _CLIENT_SECRET / _TENANT_ID / _SUBSCRIPTION_ID
+    secret/db/azure     AZURE_DB_PASSWORD (the three services share it)
       │
       ├──▶ lib/csp-env.sh (env vars)      CSP keys for the providers
       ├──▶ tofu provider "vault"          DB password for the rdbms modules
@@ -233,7 +246,7 @@ encrypted (see [State encryption](#state-encryption)).
       └──▶ Transit key tofu-state         encrypts every tofu state
 ```
 
-`register-creds.sh` validates the NCP and Alibaba passwords against the rules
+`register-creds.sh` validates the NCP, Alibaba and Azure passwords against the rules
 each CSP enforces **before** anything is prepared. Without that check, NCP
 reports the violation as a failed creation about 30 minutes later.
 
@@ -295,6 +308,7 @@ reading it needs OpenBao unsealed.
 | `alibaba/network` | VPC + vSwitch | once per run |
 | `alibaba/rdbms` | one `alicloud_db_instance` + account + admin database + public connection, or one `alicloud_mongodb_instance` + public address | per column |
 | `alibaba-target` | `alicloud_db_database` (DBOwner on PostgreSQL) | per **Alibaba** MySQL/MariaDB/PostgreSQL cell |
+| `azure/rdbms` | a resource group + one Flexible Server (MySQL or PostgreSQL) + admin database + firewall rule, or one `azurerm_mongo_cluster` + firewall rule | per column |
 | `aws/versions`, `ncp/versions`, `alibaba/versions` | nothing — data sources only | on demand |
 
 **Why a cell's databases are made two different ways.** On AWS the master
@@ -361,7 +375,7 @@ recognised by name in a console.
 | Step | What happens |
 |---|---|
 | 1 | Build the source image if this version has none, start the container, wait for `matrix-init.service` |
-| 2 | Create the empty target database — `my-target` / `pg-target` on AWS, `ncp-target` on NCP, `alibaba-target` on Alibaba |
+| 2 | Create the empty target database — `my-target` / `pg-target` on AWS and Azure, `ncp-target` on NCP, `alibaba-target` on Alibaba |
 | 3 | Register the source with cm-honeybee and collect it (`import/db`) |
 | 4 | `POST /plans/target` — **a downgrade is refused here, and the cell is BLOCK** |
 | 5 | `POST /migration`, then poll until it settles |
@@ -515,6 +529,23 @@ domain lands in state and in the outputs. If it is still absent, the column stop
 immediately rather than spending three minutes waiting on an address that does
 not exist.
 
+### 4. Azure PostgreSQL lets `session_replication_role` be set, but not reset
+
+data-mig sets `session_replication_role = replica` for a PostgreSQL restore, which
+silences FK checks and user triggers while the rows load, and sets it back to
+`DEFAULT` afterwards. The parameter needs superuser, so on most managed services
+the first `SET` is refused and data-mig loads without it - the FK constraints and
+triggers go on after the rows instead.
+
+**Azure Database for PostgreSQL Flexible Server allows the first and refuses the
+second**: its admin may set `replica`, but setting it back fails with
+
+    ERROR: permission denied to set parameter "session_replication_role" (SQLSTATE 42501)
+
+data-mig used to fail the restore on that, after every row was in. It now logs the
+refused statement and carries on: the setting is session-scoped, the connection
+closes with the restore, and nothing that still runs on it fires a trigger.
+
 ---
 
 ## Verdicts and results
@@ -606,7 +637,7 @@ CLI option  >  real shell variable  >  .env  >  script default
 | `<CSP>_<ENGINE>_DST_VERSIONS` | | columns: managed engine versions |
 | `TARGET_TLS_MODE` | `prefer` | transport security for every target connection |
 | `AWS_TARGET_SECURE_TRANSPORT` | `csp-default` | `off` attaches a parameter group allowing plaintext |
-| `PG_TARGET_TEMPLATE` | `template1` | template each cell's database is copied from (AWS only) |
+| `PG_TARGET_TEMPLATE` | `template1` | template each cell's database is copied from (AWS and Azure) |
 | `DBMS_ON_FAILURE` | `cleanup` | `keep` leaves a failed target database for inspection |
 | `MODE` | `direct` | source access: `direct` or `ssh`. The target is always `direct` |
 
@@ -620,6 +651,7 @@ release.
 ./scripts/aws-db-versions.sh              # read-only
 ./scripts/ncp-db-versions.sh
 ./scripts/alibaba-db-versions.sh
+./scripts/azure-db-versions.sh
 ./scripts/aws-db-versions.sh --write      # write the result into *_DST_VERSIONS
 ```
 
@@ -639,3 +671,11 @@ its versions and classes come from the Alibaba Cloud CLI in the tofu runner
 MongoDB version or class that is not on sale before anything is created; an RDS
 class is checked by the plan of `tofu/alibaba/rdbms`, which lists the classes
 that are sold when it does not fit.
+
+**Azure has no catalogue data source in azurerm**, so `azure-db-versions.sh`
+reads the ARM REST API instead, read-only (`lib/azure-catalog.sh`, in the tofu
+runner): the MySQL and PostgreSQL Flexible Server versions and SKUs sold in
+`AZURE_REGION` (MySQL limited to the versions azurerm accepts: 5.7, 8.0.21,
+8.4). A SKU not sold for a version is refused before anything is created. Azure
+has no API listing the MongoDB vCore versions; what is shown are the ones
+azurerm accepts (5.0-8.0), and only when the region sells vCore at all.

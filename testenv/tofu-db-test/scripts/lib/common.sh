@@ -174,18 +174,28 @@ TLS_MODES="disable prefer require verify-ca verify-full"
 #   with several engines. So mongodb cells alone drop to this value.
 MONGODB_PREFER_FALLBACK="disable"
 
+# Azure's MongoDB (Cosmos DB for MongoDB vCore) accepts TLS connections only, so
+# there prefer would always end in TLS: it stands in as require rather than
+# disable, which the server would refuse outright.
+MONGODB_PREFER_FALLBACK_AZURE="require"
+
 # target_tls_mode [ENGINE] — the mode this connection actually uses. An empty
 #   setting means disable, as it does in data-mig.
 #
 #   Given an ENGINE, a value that engine cannot use is substituted - today that is
-#   MongoDB's prefer alone, which drops to MONGODB_PREFER_FALLBACK. Called without
-#   an engine it returns the configured value as written, so the pre-flight output
-#   and the run-wide condition in the result JSON show what the user set.
+#   MongoDB's prefer alone, which drops to MONGODB_PREFER_FALLBACK (require on
+#   Azure, MONGODB_PREFER_FALLBACK_AZURE). Called without an engine it returns the
+#   configured value as written, so the pre-flight output and the run-wide
+#   condition in the result JSON show what the user set.
 target_tls_mode() {
 	local mode
 	mode="$(lower "${TARGET_TLS_MODE:-disable}")"
 	if [ "$(lower "${1:-}")" = "mongodb" ] && [ "$mode" = "prefer" ]; then
-		printf '%s' "$MONGODB_PREFER_FALLBACK"
+		if [ "$(lower "${CSP:-}")" = "azure" ]; then
+			printf '%s' "$MONGODB_PREFER_FALLBACK_AZURE"
+		else
+			printf '%s' "$MONGODB_PREFER_FALLBACK"
+		fi
 		return 0
 	fi
 	printf '%s' "$mode"

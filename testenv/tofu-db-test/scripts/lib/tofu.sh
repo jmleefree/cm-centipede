@@ -268,15 +268,20 @@ assert_db_password() {
 #   ncp  mysql postgresql mongodb   — there is no managed MariaDB
 #   alibaba  all four               — RDS for the three relational engines,
 #                                     ApsaraDB for MongoDB (a replica set)
+#   azure  mysql postgresql mongodb — Flexible Server, Cosmos DB for MongoDB
+#                                     vCore; Azure Database for MariaDB was
+#                                     retired on 2025-09-19
 MATRIX_ENGINES_AWS="mysql mariadb postgresql"
 MATRIX_ENGINES_NCP="mysql postgresql mongodb"
 MATRIX_ENGINES_ALIBABA="mysql mariadb postgresql mongodb"
+MATRIX_ENGINES_AZURE="mysql postgresql mongodb"
 
 csp_engines() {
 	case "$(lower "$1")" in
 	aws) printf '%s' "$MATRIX_ENGINES_AWS" ;;
 	ncp) printf '%s' "$MATRIX_ENGINES_NCP" ;;
 	alibaba) printf '%s' "$MATRIX_ENGINES_ALIBABA" ;;
+	azure) printf '%s' "$MATRIX_ENGINES_AZURE" ;;
 	*)   printf '' ;;
 	esac
 }
@@ -304,9 +309,12 @@ assert_engine_known() {
 	aws:mongodb)
 		fail "AWS has no managed MongoDB this matrix can use."
 		fail "  DocumentDB exposes no public endpoint, so the matrix host cannot reach it,"
-		fail "  and EC2 self-hosting is out of scope. Run it on NCP or Alibaba." ;;
+		fail "  and EC2 self-hosting is out of scope. Run it on NCP, Alibaba or Azure." ;;
 	ncp:mariadb)
 		fail "NCP has no managed MariaDB (self-hosted docker only)."
+		fail "  mariadb columns run on AWS or Alibaba." ;;
+	azure:mariadb)
+		fail "Azure Database for MariaDB was retired on 2025-09-19."
 		fail "  mariadb columns run on AWS or Alibaba." ;;
 	*)
 		fail "unknown engine '$engine' ($csp). This CSP supports: $(csp_engines "$csp")" ;;
@@ -326,6 +334,20 @@ _versions_json() {
 	csp="$(lower "$1")"
 	mod="$csp/versions"
 	cache="${MATRIX_TMP:-/tmp}/versions-$csp.json"
+	# Azure: azurerm has no catalogue data source, so the ARM REST API is read
+	# instead (lib/azure-catalog.sh, in the runner) - no tofu module, nothing
+	# applied. Its output has the same shape as the others'.
+	if [ "$csp" = "azure" ] && [ ! -f "$cache" ]; then
+		tofu_init azure/rdbms >/dev/null 2>&1 || true
+		local out
+		out="$(_in_runner azure/rdbms \
+			"AZ_REGION=$(printf '%q' "$(csp_env azure REGION)") bash /work/scripts/lib/azure-catalog.sh")"
+		if printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+			printf '%s\n' "$out" > "$cache"
+		else
+			jq -nc --arg o "${out:-(empty)}" '{azure_error: {value: ("the catalogue lookup failed: " + $o)}}' > "$cache"
+		fi
+	fi
 	if [ ! -f "$cache" ]; then
 		tofu_init "$mod" || { echo '{}' > "$cache"; cat "$cache"; return 1; }
 		# Alibaba lists what is sold in one zone for one edition per engine, so
@@ -397,6 +419,43 @@ alibaba_instance_class() {
 }
 
 alibaba_mongodb_storage_type() { alibaba_setting MONGODB_STORAGE_TYPE cloud_essd1; }
+
+# ---------------------------------------------------------------------------
+# Azure settings — the same idea: one place for the defaults, matching
+# tofu/azure/rdbms (and tofuenv's), so the SKU check below asks about exactly
+# what the module will be told to create.
+# ---------------------------------------------------------------------------
+azure_setting() {
+	local v
+	v="$(csp_env azure "$1")"
+	printf '%s' "${v:-$2}"
+}
+
+# azure_sku ENGINE — the Flexible Server SKU (MySQL, PostgreSQL).
+#
+#   Not B_Standard_B1ms, although the capabilities API lists it in koreacentral:
+#   a PostgreSQL server on it was refused with SkuNotAvailable after the create
+#   call had been accepted (2026-11-25) - a restriction on the subscription that
+#   the API does not show, so assert_target_versions cannot catch it. MySQL
+#   defaults to the next Burstable size, PostgreSQL to General Purpose.
+azure_sku() {
+	local def
+	case "$(lower "$1")" in
+	postgresql) def="GP_Standard_D2ds_v5" ;;
+	*)          def="B_Standard_B2s" ;;
+	esac
+	azure_setting "$(upper "$1")_SKU" "$def"
+}
+
+# azure_storage_gb ENGINE — MySQL 20 (20-16384), PostgreSQL 32 (a fixed size),
+#   MongoDB vCore 32.
+azure_storage_gb() {
+	local def=32
+	[ "$(lower "$1")" = "mysql" ] && def=20
+	csp_env_int azure "$(upper "$1")_STORAGE_GB" "$def"
+}
+
+azure_mongodb_tier() { azure_setting MONGODB_TIER M30; }
 alibaba_mongodb_nodes()        { csp_env_int alibaba MONGODB_NODES 3; }
 
 # _alibaba_mongodb_catalog — the MongoDB versions and classes on sale, as
@@ -545,13 +604,24 @@ assert_target_versions() {
 	csp="$(lower "$1")"; engine="$(lower "$2")"; wanted="$3"
 	available="$(rdbms_supported_versions "$csp" "$engine")"
 
-	if [ "$csp" = "ncp" ] || [ "$csp" = "alibaba" ]; then
-		# The NCP and Alibaba catalogues are complete - anything not in them is
-		# refused outright.
+	if [ "$csp" = "ncp" ] || [ "$csp" = "alibaba" ] || [ "$csp" = "azure" ]; then
+		# The NCP, Alibaba and Azure catalogues are complete - anything not in them
+		# is refused outright.
 		if [ -z "$available" ]; then
 			fail "$csp $engine: no supported-version list came back from the $(upper "$csp") catalogue."
 			if [ "$csp" = "alibaba" ] && [ "$engine" = "mongodb" ]; then
 				fail "  $(_versions_json alibaba | jq -r '.mongodb_error.value // ""')"
+			fi
+			if [ "$csp" = "azure" ]; then
+				local why
+				why="$(_versions_json azure | jq -r '.azure_error.value // ""')"
+				[ -n "$why" ] && fail "  $why"
+				[ "$engine" = "mongodb" ] \
+					&& [ "$(_versions_json azure | jq -r '.azure_mongodb_sold.value')" = "false" ] \
+					&& fail "  Cosmos DB for MongoDB vCore is not sold in AZURE_REGION=$(csp_env azure REGION)."
+				[ "$engine" = "postgresql" ] \
+					&& [ "$(_versions_json azure | jq -r '.azure_pg_restricted.value')" = "Enabled" ] \
+					&& fail "  PostgreSQL Flexible Server is restricted for this subscription in $(csp_env azure REGION)."
 			fi
 			fail "  Check that credentials are registered (./scripts/up.sh)."
 			return 1
@@ -565,6 +635,9 @@ assert_target_versions() {
 			fail "  Available: $(printf '%s' "$available" | tr '\n' ' ')"
 			if [ "$csp" = "ncp" ]; then
 				fail "  NCP needs full version strings (8.0.36, not 8.0)."
+			elif [ "$csp" = "azure" ]; then
+				fail "  Azure takes MySQL as 8.0.21 / 8.4 and PostgreSQL as a major (14), listed for"
+				fail "  AZURE_REGION=$(csp_env azure REGION). MongoDB vCore versions are the ones azurerm accepts."
 			else
 				fail "  Alibaba sells version lines (8.0, 14.0), listed for ALIBABA_ZONE=$(csp_env alibaba ZONE)"
 				[ "$engine" = "mongodb" ] \
@@ -590,6 +663,28 @@ assert_target_versions() {
 			done
 			if [ -n "$bad" ]; then
 				fail "  Fix ALIBABA_MONGODB_INSTANCE_CLASS (or _NODES / _STORAGE_TYPE). Nothing was created."
+				return 1
+			fi
+		fi
+		# Azure MySQL / PostgreSQL: the SKU as well. azurerm does not check a MySQL
+		# sku_name at all, so a SKU not sold would only fail minutes into the apply.
+		if [ "$csp" = "azure" ] && [ "$engine" != "mongodb" ]; then
+			local sku sold bad=""
+			sku="$(azure_sku "$engine")"
+			for v in $wanted; do
+				if [ "$engine" = "mysql" ]; then
+					sold="$(_versions_json azure | jq -r --arg v "$v" '(.azure_mysql_skus.value[$v] // []) | join(" ")')"
+				else
+					sold="$(_versions_json azure | jq -r '(.azure_pg_skus.value // []) | join(" ")')"
+				fi
+				case " $sold " in
+				*" $sku "*) ;;
+				*) bad=1; fail "$csp $engine $v: SKU $sku is not sold in $(csp_env azure REGION)."
+				   fail "  Sold: ${sold:-(none)}" ;;
+				esac
+			done
+			if [ -n "$bad" ]; then
+				fail "  Fix AZURE_$(upper "$engine")_SKU. Nothing was created."
 				return 1
 			fi
 		fi
@@ -632,6 +727,7 @@ ensure_network() {
 	case "$csp" in
 	ncp)     desc="VPC + PUBLIC subnet" ;;
 	alibaba) desc="VPC + vSwitch" ;;
+	azure)   info "Azure uses public access with a firewall rule per server — there is no network to create."; return 0 ;;
 	*)       info "AWS uses the default VPC — there is no network to create."; return 0 ;;
 	esac
 
@@ -711,6 +807,8 @@ RDBMS_INSTANCE_NO=""
 # group applies cleanly and leaves the port shut.
 RDBMS_ACG_NO=""; RDBMS_ACG_LIST=""
 RDBMS_PRIVATE_DOMAIN=""; RDBMS_PUBLIC_SUBNET=""
+# Azure MongoDB vCore only: the SRV name RDBMS_HOST was resolved from.
+RDBMS_SRV_NAME=""
 
 # rdbms_workspace ENGINE VERSION — the workspace name for one column.
 rdbms_workspace() {
@@ -778,6 +876,56 @@ _alibaba_rdbms_vars() {
 		 + (if $user == "" then {} else {db_username:$user} end)'
 }
 
+# _azure_rdbms_vars ENGINE VERSION — the SKU, storage and MongoDB tier are always
+#   passed, resolved through the azure_* helpers, so the module creates exactly
+#   what assert_target_versions checked.
+_azure_rdbms_vars() {
+	local engine="$1"
+	jq -n \
+		--arg engine "$engine" --arg version "$2" \
+		--arg region "$(csp_env azure REGION)" \
+		--arg prefix "$MATRIX_NAME_PREFIX" \
+		--arg db "$ADMIN_DB" \
+		--arg user "$(csp_env azure DB_ADMIN_USERNAME)" \
+		--arg cidr "$MATRIX_ALLOWED_CIDR" \
+		--arg sku "$(azure_sku "$engine")" \
+		--argjson storage "$(azure_storage_gb "$engine")" \
+		--arg tier "$(azure_mongodb_tier)" \
+		--arg ha "$(azure_setting MONGODB_HIGH_AVAILABILITY Disabled)" \
+		'{engine:$engine, engine_version:$version, azure_region:$region,
+		  name_prefix:$prefix, db_name:$db, allowed_cidr:$cidr,
+		  sku:$sku, storage_gb:$storage,
+		  mongodb_tier:$tier, mongodb_high_availability:$ha}
+		 + (if $user == "" then {} else {db_username:$user} end)'
+}
+
+# _resolve_srv NAME — "HOST PORT" for the mongodb+srv:// name NAME, from its
+#   _mongodb._tcp SRV record, resolved with dig in the tofu runner.
+#
+#   Azure's MongoDB vCore hands out only a mongodb+srv:// string, and data-mig
+#   assembles mongodb://host:port itself (always with directConnection=true),
+#   so the matrix resolves the name to what data-mig can take. The record can
+#   lag the cluster by a little, so it is retried for SRV_RESOLVE_TIMEOUT
+#   seconds (default 180).
+_resolve_srv() {
+	local name="$1" deadline line
+	deadline=$(( $(date +%s) + ${SRV_RESOLVE_TIMEOUT:-180} ))
+	while :; do
+		# "priority weight port target." - the lowest priority first.
+		line="$(docker exec "$TOFU_RUNNER" dig +short SRV "_mongodb._tcp.$name" 2>/dev/null \
+			| sort -n -k1,1 -k2,2r | head -1)"
+		if [ -n "$line" ]; then
+			set -- $line
+			if [ -n "${3:-}" ] && [ -n "${4:-}" ]; then
+				printf '%s %s' "${4%.}" "$3"
+				return 0
+			fi
+		fi
+		[ "$(date +%s)" -ge "$deadline" ] && return 1
+		sleep 10
+	done
+}
+
 # _rdbms_read CSP — read the outputs into RDBMS_*.
 _rdbms_read() {
 	local csp="$1" mod out
@@ -801,6 +949,23 @@ _rdbms_read() {
 	RDBMS_SECURE_TRANSPORT="$(tofu_out_value "$out" secure_transport)"
 	RDBMS_PRIVATE_DOMAIN="$(tofu_out_value "$out" private_domain)"
 	RDBMS_PUBLIC_SUBNET="$(tofu_out_value "$out" public_subnet)"
+
+	# Azure MongoDB vCore: host is an SRV name, resolved to the host and port
+	# everything downstream connects to (see _resolve_srv). The SRV name is kept
+	# for the log.
+	RDBMS_SRV_NAME=""
+	if [ "$(tofu_out_value "$out" host_is_srv)" = "true" ] && [ -n "$RDBMS_HOST" ]; then
+		local resolved
+		RDBMS_SRV_NAME="$RDBMS_HOST"
+		if ! resolved="$(_resolve_srv "$RDBMS_SRV_NAME")"; then
+			warn "the SRV record of $RDBMS_SRV_NAME did not resolve within ${SRV_RESOLVE_TIMEOUT:-180}s."
+			RDBMS_HOST=""; RDBMS_PORT=""; RDBMS_ENDPOINT=""
+			return 1
+		fi
+		RDBMS_HOST="${resolved% *}"
+		RDBMS_PORT="${resolved#* }"
+	fi
+
 	RDBMS_ENDPOINT="${RDBMS_HOST:+$RDBMS_HOST:$RDBMS_PORT}"
 	[ -n "$RDBMS_HOST" ]
 }
@@ -851,6 +1016,7 @@ create_rdbms() {
 	case "$csp" in
 	aws)     tofu_vars "$mod" "$(_aws_rdbms_vars "$csp_engine" "$version")" ;;
 	alibaba) tofu_vars "$mod" "$(_alibaba_rdbms_vars "$csp_engine" "$version")" ;;
+	azure)   tofu_vars "$mod" "$(_azure_rdbms_vars "$csp_engine" "$version")" ;;
 	*)       tofu_vars "$mod" "$(_ncp_rdbms_vars "$csp_engine" "$version")" ;;
 	esac
 

@@ -9,6 +9,9 @@
 #     secret/db/ncp   <- NCP_DB_PASSWORD
 #     secret/csp/alibaba <- ALIBABA_ACCESS_KEY_ID, ALIBABA_ACCESS_KEY_SECRET
 #     secret/db/alibaba  <- ALIBABA_DB_PASSWORD  (RDS and MongoDB share it)
+#     secret/csp/azure   <- AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID,
+#                           AZURE_SUBSCRIPTION_ID
+#     secret/db/azure    <- AZURE_DB_PASSWORD  (MySQL, PostgreSQL and MongoDB share it)
 #
 #   Idempotency:
 #     - A group is skipped when its "trigger" key is empty, so re-running after
@@ -170,6 +173,43 @@ if [ -n "${ALIBABA_DB_PASSWORD:-}" ]; then
     echo -e "  ${GREEN}OK${NC}   ALIBABA_DB_PASSWORD passed the RDS + MongoDB rule check"
 fi
 
+# Validate the Azure DB password against the rules the three services share
+# (the same check as tofuenv): 8-128 characters, only letters, digits and
+# ! $ ^ & * ( ) _ + - =, at least three of uppercase / lowercase / digits /
+# special characters, and not containing the admin login. Azure otherwise
+# refuses it minutes into an apply.
+validate_azure_db_password() {
+    local pw="$1" user="$2"
+    local len=${#pw}
+    local kinds=0
+    if [ "$len" -lt 8 ] || [ "$len" -gt 128 ]; then
+        echo "must be 8-128 characters (currently ${len})"; return 1
+    fi
+    if printf '%s' "$pw" | LC_ALL=C grep -q '[^A-Za-z0-9!$^&*()_+=-]'; then
+        echo "may contain only letters, digits and ! \$ ^ & * ( ) _ + - ="; return 1
+    fi
+    printf '%s' "$pw" | LC_ALL=C grep -q '[A-Z]'           && kinds=$((kinds + 1))
+    printf '%s' "$pw" | LC_ALL=C grep -q '[a-z]'           && kinds=$((kinds + 1))
+    printf '%s' "$pw" | LC_ALL=C grep -q '[0-9]'           && kinds=$((kinds + 1))
+    printf '%s' "$pw" | LC_ALL=C grep -q '[!$^&*()_+=-]'   && kinds=$((kinds + 1))
+    if [ "$kinds" -lt 3 ]; then
+        echo "must mix at least three of uppercase, lowercase, digits and special characters (has ${kinds})"; return 1
+    fi
+    if [ -n "$user" ] && printf '%s' "$pw" | LC_ALL=C grep -qiF -- "$user"; then
+        echo "must not contain the admin login '${user}' (AZURE_DB_ADMIN_USERNAME)"; return 1
+    fi
+    return 0
+}
+
+if [ -n "${AZURE_DB_PASSWORD:-}" ]; then
+    if ! reason=$(validate_azure_db_password "$AZURE_DB_PASSWORD" "${AZURE_DB_ADMIN_USERNAME:-dbadmin}"); then
+        echo -e "  ${RED}FAIL${NC} AZURE_DB_PASSWORD rejected: ${reason}" >&2
+        echo -e "  ${YELLOW}See the Azure password rules in .env.example.${NC}" >&2
+        exit 1
+    fi
+    echo -e "  ${GREEN}OK${NC}   AZURE_DB_PASSWORD passed the MySQL + PostgreSQL + MongoDB rule check"
+fi
+
 register_group "csp/aws" "AWS_SECRET_ACCESS_KEY" \
     AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 register_group "db/aws" "AWS_DB_PASSWORD" \
@@ -182,6 +222,10 @@ register_group "csp/alibaba" "ALIBABA_ACCESS_KEY_SECRET" \
     ALIBABA_ACCESS_KEY_ID ALIBABA_ACCESS_KEY_SECRET
 register_group "db/alibaba" "ALIBABA_DB_PASSWORD" \
     ALIBABA_DB_PASSWORD
+register_group "csp/azure" "AZURE_CLIENT_SECRET" \
+    AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID
+register_group "db/azure" "AZURE_DB_PASSWORD" \
+    AZURE_DB_PASSWORD
 
 # Blank the keys that were registered successfully
 if [ "${#KEYS_TO_BLANK[@]}" -gt 0 ]; then

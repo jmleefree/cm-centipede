@@ -1,6 +1,6 @@
 # OpenTofu runner (a long-lived container)
 #   Ships tofu, the Alibaba Cloud CLI (aliyun), curl, jq, git, openssh-client,
-#   psql and bash.
+#   psql, dig and bash.
 #   lib/tofu.sh runs its tofu commands in this container through docker exec.
 #
 #   psql is here for one job: the privilege pre-flight that decides whether a
@@ -16,8 +16,11 @@ ARG TARGETARCH=amd64
 # Alibaba matrix checks before creating anything. --build-arg ALIYUN_CLI_VERSION=x.y.z
 ARG ALIYUN_CLI_VERSION=3.5.2
 
+# dnsutils (dig) resolves the SRV record of Azure's mongodb+srv:// string to the
+# host and port data-mig connects to; data-mig assembles mongodb://host:port
+# itself and takes no SRV name.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl unzip ca-certificates bash jq git openssh-client postgresql-client \
+        curl unzip ca-certificates bash jq git openssh-client postgresql-client dnsutils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install OpenTofu by extracting just the tofu binary from the release zip.

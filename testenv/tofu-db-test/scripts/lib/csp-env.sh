@@ -17,6 +17,7 @@
 #     aws/*            aws
 #     ncp/*, ncp-target  ncp
 #     alibaba/*, alibaba-target  alibaba
+#     azure/*          azure
 #     my-target, pg-target  none - they speak the database protocol, and get
 #                      their connection through variables
 #
@@ -40,6 +41,7 @@ _csp_env() {
 		/work/tofu/aws/*)                      csp=aws ;;
 		/work/tofu/ncp/*|/work/tofu/ncp-target) csp=ncp ;;
 		/work/tofu/alibaba/*|/work/tofu/alibaba-target) csp=alibaba ;;
+		/work/tofu/azure/*)                     csp=azure ;;
 		/work/tofu/my-target|/work/tofu/pg-target) return 0 ;;
 		*) echo "csp-env.sh: no CSP is known for $PWD" >&2; return 1 ;;
 		esac
@@ -70,6 +72,14 @@ _csp_env() {
 		export ALIBABA_CLOUD_ACCESS_KEY_SECRET="$(_csp_get ALIBABA_ACCESS_KEY_SECRET)"
 		export ALICLOUD_ACCESS_KEY="$ALIBABA_CLOUD_ACCESS_KEY_ID"
 		export ALICLOUD_SECRET_KEY="$ALIBABA_CLOUD_ACCESS_KEY_SECRET"
+		;;
+	azure)
+		# The service principal, as azurerm reads it. lib/azure-catalog.sh uses
+		# the same four for its token request.
+		export ARM_CLIENT_ID="$(_csp_get AZURE_CLIENT_ID)"
+		export ARM_CLIENT_SECRET="$(_csp_get AZURE_CLIENT_SECRET)"
+		export ARM_TENANT_ID="$(_csp_get AZURE_TENANT_ID)"
+		export ARM_SUBSCRIPTION_ID="$(_csp_get AZURE_SUBSCRIPTION_ID)"
 		;;
 	*)
 		echo "csp-env.sh: unknown CSP '${csp}'" >&2

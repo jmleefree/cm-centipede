@@ -123,6 +123,15 @@ db_versions_main() {
 		info "  mongodb: a replica set of $(alibaba_mongodb_nodes) nodes on $(alibaba_mongodb_storage_type), from the Alibaba Cloud CLI"
 		info "  (the provider has no MongoDB catalogue)."
 	fi
+	if [ "$(lower "$CSP")" = "azure" ]; then
+		info "Read from the ARM REST API (read-only) for region $(csp_env azure REGION): azurerm has no catalogue."
+		info "  mysql: what the region sells that azurerm accepts (5.7, 8.0.21, 8.4)."
+		info "  mongodb: Azure has no API listing vCore versions; these are what azurerm"
+		info "  accepts (5.0-8.0), shown only when the region sells vCore at all."
+		local azerr
+		azerr="$(_versions_json azure | jq -r '.azure_error.value // ""')"
+		[ -n "$azerr" ] && warn "  $azerr"
+	fi
 
 	for engine in $engines; do
 		mark=" "
