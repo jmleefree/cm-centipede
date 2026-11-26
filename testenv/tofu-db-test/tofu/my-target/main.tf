@@ -16,9 +16,12 @@ resource "mysql_database" "target" {
 
   name = each.value
 
-  # Character set and collation are left at the instance defaults on purpose.
-  # A managed target follows its own server defaults, and that is the real
-  # migration condition; forcing the source's values here would hide a mismatch
-  # the run is meant to reveal. Table character sets travel inside the dump's
-  # CREATE TABLE statements either way.
+  # Stated, not left to the instance. This used to be left out, meant to follow
+  # the server's defaults, but the provider (petoju/mysql) fills in these two
+  # values itself when none is given, so every cell database was created with
+  # them all along. Writing them here keeps that if the provider's default
+  # changes, and matches the sources (MYSQL_SRC_CHARSET / _COLLATION). Table
+  # character sets travel inside the dump's CREATE TABLE statements either way.
+  default_character_set = "utf8mb4"
+  default_collation     = "utf8mb4_general_ci"
 }

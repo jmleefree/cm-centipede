@@ -132,6 +132,14 @@ db_versions_main() {
 		azerr="$(_versions_json azure | jq -r '.azure_error.value // ""')"
 		[ -n "$azerr" ] && warn "  $azerr"
 	fi
+	if [ "$(lower "$CSP")" = "gcp" ]; then
+		info "Read from the Cloud SQL Admin REST API (read-only): google has no catalogue."
+		info "  The versions any Cloud SQL flag applies to, written as .env takes them"
+		info "  (MYSQL_8_4 -> 8.4, POSTGRES_16 -> 16). Major lines (8.0, 8.4) are what to use."
+		local gcperr
+		gcperr="$(_versions_json gcp | jq -r '.gcp_error.value // ""')"
+		[ -n "$gcperr" ] && warn "  $gcperr"
+	fi
 
 	for engine in $engines; do
 		mark=" "

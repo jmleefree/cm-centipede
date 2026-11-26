@@ -271,10 +271,12 @@ assert_db_password() {
 #   azure  mysql postgresql mongodb — Flexible Server, Cosmos DB for MongoDB
 #                                     vCore; Azure Database for MariaDB was
 #                                     retired on 2025-09-19
+#   gcp  mysql postgresql           — Cloud SQL; no managed MariaDB or MongoDB
 MATRIX_ENGINES_AWS="mysql mariadb postgresql"
 MATRIX_ENGINES_NCP="mysql postgresql mongodb"
 MATRIX_ENGINES_ALIBABA="mysql mariadb postgresql mongodb"
 MATRIX_ENGINES_AZURE="mysql postgresql mongodb"
+MATRIX_ENGINES_GCP="mysql postgresql"
 
 csp_engines() {
 	case "$(lower "$1")" in
@@ -282,6 +284,7 @@ csp_engines() {
 	ncp) printf '%s' "$MATRIX_ENGINES_NCP" ;;
 	alibaba) printf '%s' "$MATRIX_ENGINES_ALIBABA" ;;
 	azure) printf '%s' "$MATRIX_ENGINES_AZURE" ;;
+	gcp)   printf '%s' "$MATRIX_ENGINES_GCP" ;;
 	*)   printf '' ;;
 	esac
 }
@@ -316,6 +319,12 @@ assert_engine_known() {
 	azure:mariadb)
 		fail "Azure Database for MariaDB was retired on 2025-09-19."
 		fail "  mariadb columns run on AWS or Alibaba." ;;
+	gcp:mariadb)
+		fail "GCP has no managed MariaDB (Cloud SQL offers MySQL, PostgreSQL and SQL Server)."
+		fail "  mariadb columns run on AWS or Alibaba." ;;
+	gcp:mongodb)
+		fail "GCP has no managed MongoDB (Firestore's MongoDB compatibility is not MongoDB)."
+		fail "  mongodb columns run on NCP, Alibaba or Azure." ;;
 	*)
 		fail "unknown engine '$engine' ($csp). This CSP supports: $(csp_engines "$csp")" ;;
 	esac
@@ -346,6 +355,18 @@ _versions_json() {
 			printf '%s\n' "$out" > "$cache"
 		else
 			jq -nc --arg o "${out:-(empty)}" '{azure_error: {value: ("the catalogue lookup failed: " + $o)}}' > "$cache"
+		fi
+	fi
+	# GCP: google has no catalogue data source either, so the sqladmin REST API
+	# is read (lib/gcp-catalog.sh, in the runner) - no tofu module, nothing applied.
+	if [ "$csp" = "gcp" ] && [ ! -f "$cache" ]; then
+		local gout
+		gout="$(_in_runner gcp/rdbms \
+			"GCP_REGION=$(printf '%q' "$(csp_env gcp REGION)") bash /work/scripts/lib/gcp-catalog.sh")"
+		if printf '%s' "$gout" | jq -e . >/dev/null 2>&1; then
+			printf '%s\n' "$gout" > "$cache"
+		else
+			jq -nc --arg o "${gout:-(empty)}" '{gcp_error: {value: ("the catalogue lookup failed: " + $o)}}' > "$cache"
 		fi
 	fi
 	if [ ! -f "$cache" ]; then
@@ -456,6 +477,19 @@ azure_storage_gb() {
 }
 
 azure_mongodb_tier() { azure_setting MONGODB_TIER M30; }
+
+# ---------------------------------------------------------------------------
+# GCP settings — the defaults match tofu/gcp/rdbms (and tofuenv's).
+# ---------------------------------------------------------------------------
+
+# gcp_tier ENGINE — db-custom-1-3840 (1 vCPU / 3.75 GB) for both engines.
+gcp_tier() {
+	local v
+	v="$(csp_env gcp "$(upper "$1")_TIER")"
+	printf '%s' "${v:-db-custom-1-3840}"
+}
+
+gcp_storage_gb() { csp_env_int gcp "$(upper "$1")_STORAGE_GB" 20; }
 alibaba_mongodb_nodes()        { csp_env_int alibaba MONGODB_NODES 3; }
 
 # _alibaba_mongodb_catalog — the MongoDB versions and classes on sale, as
@@ -604,9 +638,9 @@ assert_target_versions() {
 	csp="$(lower "$1")"; engine="$(lower "$2")"; wanted="$3"
 	available="$(rdbms_supported_versions "$csp" "$engine")"
 
-	if [ "$csp" = "ncp" ] || [ "$csp" = "alibaba" ] || [ "$csp" = "azure" ]; then
-		# The NCP, Alibaba and Azure catalogues are complete - anything not in them
-		# is refused outright.
+	if [ "$csp" = "ncp" ] || [ "$csp" = "alibaba" ] || [ "$csp" = "azure" ] || [ "$csp" = "gcp" ]; then
+		# The NCP, Alibaba, Azure and GCP catalogues are complete - anything not in
+		# them is refused outright.
 		if [ -z "$available" ]; then
 			fail "$csp $engine: no supported-version list came back from the $(upper "$csp") catalogue."
 			if [ "$csp" = "alibaba" ] && [ "$engine" = "mongodb" ]; then
@@ -623,6 +657,17 @@ assert_target_versions() {
 					&& [ "$(_versions_json azure | jq -r '.azure_pg_restricted.value')" = "Enabled" ] \
 					&& fail "  PostgreSQL Flexible Server is restricted for this subscription in $(csp_env azure REGION)."
 			fi
+			if [ "$csp" = "gcp" ]; then
+				local gwhy
+				gwhy="$(_versions_json gcp | jq -r '.gcp_error.value // ""')"
+				if [ -n "$gwhy" ]; then
+					fail "  $gwhy"
+					case "$gwhy" in
+					SERVICE_DISABLED*|*"has not been used"*|*"is disabled"*)
+						fail "  Enable the Cloud SQL Admin API on the project: gcloud services enable sqladmin.googleapis.com" ;;
+					esac
+				fi
+			fi
 			fail "  Check that credentials are registered (./scripts/up.sh)."
 			return 1
 		fi
@@ -635,6 +680,8 @@ assert_target_versions() {
 			fail "  Available: $(printf '%s' "$available" | tr '\n' ' ')"
 			if [ "$csp" = "ncp" ]; then
 				fail "  NCP needs full version strings (8.0.36, not 8.0)."
+			elif [ "$csp" = "gcp" ]; then
+				fail "  Cloud SQL versions are written as numbers: MySQL 8.0 / 8.4, PostgreSQL a major (16)."
 			elif [ "$csp" = "azure" ]; then
 				fail "  Azure takes MySQL as 8.0.21 / 8.4 and PostgreSQL as a major (14), listed for"
 				fail "  AZURE_REGION=$(csp_env azure REGION). MongoDB vCore versions are the ones azurerm accepts."
@@ -688,6 +735,24 @@ assert_target_versions() {
 				return 1
 			fi
 		fi
+		# GCP: a predefined tier as well. A db-custom-<vCPU>-<MB> tier is built to
+		# measure and listed nowhere, so it is left to the apply.
+		if [ "$csp" = "gcp" ]; then
+			local tier sold
+			tier="$(gcp_tier "$engine")"
+			case "$tier" in
+			db-custom-*) ;;
+			*)
+				sold="$(_versions_json gcp | jq -r '(.gcp_tiers.value // []) | join(" ")')"
+				case " $sold " in
+				*" $tier "*) ;;
+				*) fail "$csp $engine: tier $tier is not offered in $(csp_env gcp REGION)."
+				   fail "  Offered: ${sold:-(none)}, or db-custom-<vCPU>-<memory MB>"
+				   fail "  Fix GCP_$(upper "$engine")_TIER. Nothing was created."
+				   return 1 ;;
+				esac ;;
+			esac
+		fi
 		info "$csp $engine target versions confirmed: $wanted"
 		return 0
 	fi
@@ -728,6 +793,7 @@ ensure_network() {
 	ncp)     desc="VPC + PUBLIC subnet" ;;
 	alibaba) desc="VPC + vSwitch" ;;
 	azure)   info "Azure uses public access with a firewall rule per server — there is no network to create."; return 0 ;;
+	gcp)     info "GCP gives each instance a public IP with an authorized network — there is no network to create."; return 0 ;;
 	*)       info "AWS uses the default VPC — there is no network to create."; return 0 ;;
 	esac
 
@@ -899,6 +965,26 @@ _azure_rdbms_vars() {
 		 + (if $user == "" then {} else {db_username:$user} end)'
 }
 
+# _gcp_rdbms_vars ENGINE VERSION — the tier and storage are always passed,
+#   resolved through the gcp_* helpers. The project is not: csp-env.sh exports
+#   it as TF_VAR_gcp_project_id with the service account.
+_gcp_rdbms_vars() {
+	local engine="$1"
+	jq -n \
+		--arg engine "$engine" --arg version "$2" \
+		--arg region "$(csp_env gcp REGION)" \
+		--arg prefix "$MATRIX_NAME_PREFIX" \
+		--arg db "$ADMIN_DB" \
+		--arg user "$(csp_env gcp DB_ADMIN_USERNAME)" \
+		--arg cidr "$MATRIX_ALLOWED_CIDR" \
+		--arg tier "$(gcp_tier "$engine")" \
+		--argjson storage "$(gcp_storage_gb "$engine")" \
+		'{engine:$engine, engine_version:$version, gcp_region:$region,
+		  name_prefix:$prefix, db_name:$db, allowed_cidr:$cidr,
+		  tier:$tier, storage_gb:$storage}
+		 + (if $user == "" then {} else {db_username:$user} end)'
+}
+
 # _resolve_srv NAME — "HOST PORT" for the mongodb+srv:// name NAME, from its
 #   _mongodb._tcp SRV record, resolved with dig in the tofu runner.
 #
@@ -1017,6 +1103,7 @@ create_rdbms() {
 	aws)     tofu_vars "$mod" "$(_aws_rdbms_vars "$csp_engine" "$version")" ;;
 	alibaba) tofu_vars "$mod" "$(_alibaba_rdbms_vars "$csp_engine" "$version")" ;;
 	azure)   tofu_vars "$mod" "$(_azure_rdbms_vars "$csp_engine" "$version")" ;;
+	gcp)     tofu_vars "$mod" "$(_gcp_rdbms_vars "$csp_engine" "$version")" ;;
 	*)       tofu_vars "$mod" "$(_ncp_rdbms_vars "$csp_engine" "$version")" ;;
 	esac
 
@@ -1181,6 +1268,14 @@ cleanup_all_workspaces() {
 PG_CAN_CREATE=""; PG_CAN_GRANT=""; PG_CAN_CREATEDB=""; PG_CAN_CREATE_SCHEMA=""
 PG_PUBLIC_ACL=""; PG_DB_OWNER=""
 PG_GRANT_EFFECTIVE="false"
+# Why PG_GRANT_EFFECTIVE is what it is, for the log only (the module and the
+# result JSON take PG_GRANT_EFFECTIVE). false alone read like a failure, while it
+# also means the GRANT was simply not needed.
+#   not needed    the account can already create in public
+#   issued        public is closed, and a GRANT is issued per cell
+#   not possible  public is closed, and no GRANT can be issued
+#   unknown       the privilege query failed
+PG_GRANT_REASON="unknown"
 
 # The schema a cell's data is restored into. Empty means schema public, which is
 # what a migration normally uses. It is filled in by target_db_probe when public
@@ -1247,6 +1342,7 @@ SELECT has_schema_privilege(current_user,'public','CREATE'),
 		warn "the privilege query failed — running the probe without a GRANT."
 		printf '%s\n' "$out" | sed 's/^/      /' >&2
 		PG_GRANT_EFFECTIVE="false"
+		PG_GRANT_REASON="unknown"
 
 # The schema a cell's data is restored into. Empty means schema public, which is
 # what a migration normally uses. It is filled in by target_db_probe when public
@@ -1272,6 +1368,7 @@ PG_TARGET_SCHEMA=""
 
 	if [ "$PG_CAN_CREATE" = "t" ]; then
 		PG_GRANT_EFFECTIVE="false"
+		PG_GRANT_REASON="not needed"
 
 # The schema a cell's data is restored into. Empty means schema public, which is
 # what a migration normally uses. It is filled in by target_db_probe when public
@@ -1281,12 +1378,14 @@ PG_TARGET_SCHEMA=""
 		ok "it can already create in public — no GRANT needed."
 	elif [ "$PG_CAN_GRANT" = "t" ]; then
 		PG_GRANT_EFFECTIVE="true"
+		PG_GRANT_REASON="issued"
 		ok "public is closed but a GRANT can be issued — granted per cell."
 	else
 		# A GRANT needs the schema's owner, or membership of the owner role. With
 		# neither there is no way to issue one, so this stays false and the probe's
 		# table creation is what catches it.
 		PG_GRANT_EFFECTIVE="false"
+		PG_GRANT_REASON="not possible"
 
 # The schema a cell's data is restored into. Empty means schema public, which is
 # what a migration normally uses. It is filled in by target_db_probe when public
@@ -1466,10 +1565,15 @@ target_db_create() {
 			# template, and issues no GRANT - so neither of those is reported here.
 			info "target database created: $dbs  (owner $RDBMS_USER, via the NCP API)"
 		else
-			info "target database created: $dbs  (owner $RDBMS_USER, template ${PG_TARGET_TEMPLATE:-template1}, public GRANT=$PG_GRANT_EFFECTIVE)"
+			info "target database created: $dbs  (owner $RDBMS_USER, template ${PG_TARGET_TEMPLATE:-template1}, public GRANT: $PG_GRANT_REASON)"
 		fi
+	elif [ "$mod" = "ncp-target" ]; then
+		# ncloud_mysql_databases takes a name only, so the database gets the
+		# instance's default character set.
+		info "target database created: $dbs  (instance default charset, via the NCP API)"
 	else
-		info "target database created: $dbs  (instance default charset; setup connected on the best transport the server offers)"
+		# my-target states both (tofu/my-target/main.tf).
+		info "target database created: $dbs  (utf8mb4 / utf8mb4_general_ci)"
 	fi
 	return 0
 }

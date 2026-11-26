@@ -18,6 +18,7 @@
 #     ncp/*, ncp-target  ncp
 #     alibaba/*, alibaba-target  alibaba
 #     azure/*          azure
+#     gcp/*            gcp
 #     my-target, pg-target  none - they speak the database protocol, and get
 #                      their connection through variables
 #
@@ -42,6 +43,7 @@ _csp_env() {
 		/work/tofu/ncp/*|/work/tofu/ncp-target) csp=ncp ;;
 		/work/tofu/alibaba/*|/work/tofu/alibaba-target) csp=alibaba ;;
 		/work/tofu/azure/*)                     csp=azure ;;
+		/work/tofu/gcp/*)                       csp=gcp ;;
 		/work/tofu/my-target|/work/tofu/pg-target) return 0 ;;
 		*) echo "csp-env.sh: no CSP is known for $PWD" >&2; return 1 ;;
 		esac
@@ -80,6 +82,23 @@ _csp_env() {
 		export ARM_CLIENT_SECRET="$(_csp_get AZURE_CLIENT_SECRET)"
 		export ARM_TENANT_ID="$(_csp_get AZURE_TENANT_ID)"
 		export ARM_SUBSCRIPTION_ID="$(_csp_get AZURE_SUBSCRIPTION_ID)"
+		;;
+	gcp)
+		# The JSON key is put back together from its fields, as the provider
+		# takes it. GCP_PRIVATE_KEY is stored as .env held it, one line with
+		# literal \n (cb-tumblebug's format); a PEM key needs real newlines.
+		# lib/gcp-catalog.sh signs its token request with the same key.
+		export GOOGLE_CREDENTIALS="$(jq -c '{
+			type:           "service_account",
+			project_id:     .GCP_PROJECT_ID,
+			private_key_id: .GCP_PRIVATE_KEY_ID,
+			private_key:    ((.GCP_PRIVATE_KEY // "") | gsub("\\\\n"; "\n")),
+			client_email:   .GCP_CLIENT_EMAIL,
+			client_id:      .GCP_CLIENT_ID,
+			token_uri:      "https://oauth2.googleapis.com/token"
+		}' <<<"$json")"
+		# Not a secret: the project, which the provider takes.
+		export TF_VAR_gcp_project_id="$(_csp_get GCP_PROJECT_ID)"
 		;;
 	*)
 		echo "csp-env.sh: unknown CSP '${csp}'" >&2
